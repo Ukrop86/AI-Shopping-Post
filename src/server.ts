@@ -1910,9 +1910,27 @@ async function startServer() {
   });
 
   app.get("/auth/tiktok/callback", async (req: Request, res: Response) => {
+    const stateRaw = req.query.state as string;
+
+    // Cross-project OAuth relay. The TikTok Developer Portal locks the redirect URI
+    // to Postly's single reviewed callback, so a separate project (the "Чи Знали Ви?"
+    // TikTok mini-app on tiktok-chanel-production.up.railway.app) runs its consent
+    // flow through here and we simply bounce TikTok's response straight back to it,
+    // untouched. We do NOT exchange the one-time code or persist anything — that
+    // project owns the token exchange; consuming the code here would break it with
+    // "code already used". Its states are namespaced with a "cvz-" prefix so they
+    // never collide with Postly's own signed-JWT states. Forward the RAW query string
+    // exactly as received (code, state, scopes, error, error_description — everything,
+    // especially state, which the far side verifies). Nothing is logged: code and
+    // state are one-time secrets.
+    if (typeof stateRaw === "string" && stateRaw.startsWith("cvz-")) {
+      const qIndex = req.originalUrl.indexOf("?");
+      const rawQuery = qIndex >= 0 ? req.originalUrl.slice(qIndex + 1) : "";
+      return res.redirect(302, `https://tiktok-chanel-production.up.railway.app/tiktok/callback?${rawQuery}`);
+    }
+
     const code = req.query.code as string;
     const error = req.query.error as string;
-    const stateRaw = req.query.state as string;
     if (error || !code) {
       return res.send(`<script>window.opener?.postMessage({type:'tiktok-auth',error:'${error||"no_code"}'},'*');window.close();</script>`);
     }
