@@ -380,7 +380,8 @@ function parseSocialLinks(raw: unknown): string[] {
   }
 }
 
-// Parses the per-platform markup map, keeping only finite non-negative numbers.
+// Parses the per-platform markup map. Values may be positive (markup) or negative
+// (discount); 0/absent means no change. Keeps finite non-zero numbers only.
 function parsePlatformMarkups(raw: unknown): Record<string, number> {
   if (typeof raw !== "string" || !raw) return {};
   try {
@@ -389,7 +390,7 @@ function parsePlatformMarkups(raw: unknown): Record<string, number> {
     const out: Record<string, number> = {};
     for (const [k, v] of Object.entries(parsed)) {
       const n = Number(v);
-      if (isFinite(n) && n > 0) out[k] = n;
+      if (isFinite(n) && n !== 0) out[k] = n;
     }
     return out;
   } catch {
@@ -1756,13 +1757,15 @@ async function startServer() {
       return res.status(400).json({ success: false, message: "Невідома платформа" });
     }
     const pct = Number(percent);
-    if (!isFinite(pct) || pct < 0 || pct > 1000) {
-      return res.status(400).json({ success: false, message: "Націнка має бути числом від 0 до 1000" });
+    // Negative = discount, positive = markup, 0 = no change. Floor above -100 so a
+    // discount can never drive the price to zero or below.
+    if (!isFinite(pct) || pct <= -100 || pct > 1000) {
+      return res.status(400).json({ success: false, message: "Націнка має бути числом від -99 до 1000" });
     }
     const userId = currentUserId(req);
     const markups = await getPlatformMarkups(db, userId);
-    if (pct > 0) markups[platform] = pct;
-    else delete markups[platform]; // 0 = no markup, don't store it
+    if (pct !== 0) markups[platform] = pct;
+    else delete markups[platform]; // 0 = no change, don't store it
     const now = new Date().toISOString();
     await db.run(
       `

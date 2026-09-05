@@ -79,10 +79,11 @@ export async function generatePlatformPost(
   return response.output_text.trim();
 }
 
-// Applies a percentage markup to a price string, preserving whatever currency
-// text surrounds the number (e.g. "980 грн" + 10% → "1078 грн"). Handles spaces
-// as thousand separators and comma/dot decimals; rounds to a whole unit. Returns
-// the input unchanged when there's no markup or no parseable number.
+// Applies a percentage change to a price string, preserving whatever currency
+// text surrounds the number (e.g. "980 грн" + 10% → "1078 грн", -15% → "833 грн").
+// pct may be positive (markup) or negative (discount). Handles spaces as thousand
+// separators and comma/dot decimals; rounds to a whole unit and never goes below 0.
+// Returns the input unchanged when there's no change (0) or no parseable number.
 export function applyPriceMarkup(price: string | undefined, pct: number): string {
   const raw = (price ?? "").toString();
   if (!raw || !pct) return raw;
@@ -91,7 +92,7 @@ export function applyPriceMarkup(price: string | undefined, pct: number): string
   const numStr = match[0];
   const value = parseFloat(numStr.replace(/\s/g, "").replace(",", "."));
   if (!isFinite(value)) return raw;
-  const marked = Math.round(value * (1 + pct / 100));
+  const marked = Math.max(0, Math.round(value * (1 + pct / 100)));
   return raw.replace(numStr, String(marked));
 }
 
