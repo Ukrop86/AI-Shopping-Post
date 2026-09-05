@@ -1934,6 +1934,14 @@ async function startServer() {
     res.json({ success: true });
   });
 
+  // Recorded per-category field snapshots (captured the first time each Shafa
+  // category is published to). Lets us inspect which fields a category actually has
+  // and tune the AI/mapping later.
+  app.get("/api/shafa/category-schemas", ...requireUser, async (req: Request, res: Response) => {
+    const { listCategorySchemas } = await import("./shafa/shafa.publisher");
+    res.json({ schemas: await listCategorySchemas(currentUserId(req)) });
+  });
+
   // Plain <a target="_blank"> links can't send an Authorization header, so this one
   // route also accepts the JWT as ?token= (same mechanism already used for the OAuth
   // redirect flows) instead of requireUser's Bearer-header-only check.

@@ -631,6 +631,112 @@ async function fillPrice(page: Page, price: string) {
 
 // ─── Основний потік ───────────────────────────────────────────────────────
 
+// ─── Виявлення полів категорії (для дебагу) ───────────────────────────────
+//
+// Різні категорії Shafa показують різні характеристики (напр. "Наповнення" для
+// сумок/курток), і ми не можемо знати їх наперед. Тому першого разу для кожної
+// категорії ми знімаємо повний зліпок полів форми і зберігаємо його у файл —
+// щоб потім можна було подивитися, які саме поля є, і навчити AI їх заповнювати.
+
+function categorySlug(categoryPath: string[]): string {
+  const joined = (categoryPath || []).filter(Boolean).join("__");
+  return (joined.replace(/[^\p{L}\p{N}]+/gu, "-").replace(/^-+|-+$/g, "").slice(0, 120)) || "unknown";
+}
+
+const schemaDir = () => `${debugDir()}/shafa-schema`;
+
+type DiscoveredField = { label: string; kind: string; value?: string };
+
+async function discoverCategorySchema(page: Page): Promise<{ fields: DiscoveredField[]; buttons: string[] }> {
+  // NB: no named function consts inside evaluate() — tsx/esbuild would inject a
+  // __name() helper that doesn't exist in the browser context and throws. Keep the
+  // logic inline / anonymous, matching the other evaluate blocks in this file.
+  const result = await page.evaluate(() => {
+    const fields: { label: string; kind: string; value?: string }[] = [];
+
+    // react-select style dropdown fields: a "-control" with the nearest label text before it
+    const controls = Array.from(document.querySelectorAll('[class*="-control"]'))
+      .filter((c) => (c as HTMLElement).offsetParent !== null);
+    for (const c of controls) {
+      let label = "";
+      let a: Element | null = c.parentElement;
+      let depth = 0;
+      while (a && depth < 5 && !label) {
+        for (const k of Array.from(a.children)) {
+          if (k === c || k.contains(c)) break;
+          const t = ((k as HTMLElement).innerText || k.textContent || "").replace(/\s+/g, " ").trim();
+          if (t && t.length > 1 && t.length < 40) label = t;
+        }
+        a = a.parentElement;
+        depth++;
+      }
+      const value = ((c as HTMLElement).innerText || c.textContent || "").replace(/\s+/g, " ").trim();
+      fields.push({ label, kind: "select", value });
+    }
+
+    // free-text inputs / textareas with a placeholder
+    for (const el of Array.from(document.querySelectorAll("input[type=text], textarea"))) {
+      if ((el as HTMLElement).offsetParent === null) continue;
+      const ph = ((el as HTMLInputElement).placeholder || "").replace(/\s+/g, " ").trim();
+      if (ph) fields.push({ label: ph, kind: el.tagName === "TEXTAREA" ? "textarea" : "text" });
+    }
+
+    // option chips / buttons (seasons, features, sleeve type, …) — raw list for reference
+    const seen: Record<string, boolean> = {};
+    const buttons: string[] = [];
+    for (const b of Array.from(document.querySelectorAll('button, [role="button"]'))) {
+      if ((b as HTMLElement).offsetParent === null) continue;
+      const t = ((b as HTMLElement).innerText || b.textContent || "").replace(/\s+/g, " ").trim();
+      if (t && t.length > 0 && t.length < 40 && !seen[t]) { seen[t] = true; buttons.push(t); }
+    }
+
+    return { fields, buttons };
+  });
+  return result;
+}
+
+async function recordCategorySchema(page: Page, categoryPath: string[], debugPrefix: string) {
+  try {
+    const dir = schemaDir();
+    await fs.mkdir(dir, { recursive: true });
+    const file = `${dir}/${debugPrefix}${categorySlug(categoryPath)}.json`;
+    if (await fileExists(file)) {
+      console.log(`[Shafa] category schema already recorded → ${file}`);
+      return;
+    }
+    const schema = await discoverCategorySchema(page);
+    const payload = {
+      categoryPath,
+      url: page.url(),
+      capturedAt: new Date().toISOString(),
+      fields: schema.fields,
+      buttons: schema.buttons,
+    };
+    await fs.writeFile(file, JSON.stringify(payload, null, 2), "utf8");
+    console.log(`[Shafa] recorded category schema (${schema.fields.length} fields, ${schema.buttons.length} buttons) → ${file}`);
+  } catch (e) {
+    // Never let discovery break a real publish — it's a debugging aid only.
+    console.log(`[Shafa] category schema discovery failed: ${(e as Error).message?.slice(0, 120)}`);
+  }
+}
+
+// Returns all recorded category-field snapshots for a user (for the debug view).
+export async function listCategorySchemas(userId: number): Promise<any[]> {
+  try {
+    const dir = schemaDir();
+    if (!fsSync.existsSync(dir)) return [];
+    const prefix = shafaDebugPrefixForUser(userId);
+    const files = (await fs.readdir(dir)).filter((f) => f.startsWith(prefix) && f.endsWith(".json"));
+    const out: any[] = [];
+    for (const f of files) {
+      try { out.push(JSON.parse(await fs.readFile(`${dir}/${f}`, "utf8"))); } catch { /* skip bad file */ }
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
 async function fillShafaForm(page: Page, product: ShafaProduct, debugPrefix: string) {
   await page.goto("https://shafa.ua/uk/new", { waitUntil: "domcontentloaded", timeout: 90000 });
   await humanPause(3000);
@@ -644,6 +750,9 @@ async function fillShafaForm(page: Page, product: ShafaProduct, debugPrefix: str
   await P();
   await fillCategory(page, product.categoryPath);
   await P();
+  // First time we see this category, snapshot all its fields to a debug file —
+  // categories differ (e.g. "Наповнення"), so this lets us see and tune later.
+  await recordCategorySchema(page, product.categoryPath, debugPrefix);
   await fillCondition(page, product.condition);
   await fillBrand(page, product.brand);
   await fillQuantity(page, product.quantity);

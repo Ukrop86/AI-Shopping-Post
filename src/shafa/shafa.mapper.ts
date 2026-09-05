@@ -36,7 +36,19 @@ export function mapProductToShafa(
   }
 
   const title = typeof ai.title === "string" ? ai.title : product.title;
-  const description = typeof ai.description === "string" ? ai.description : aiJson;
+  let description = typeof ai.description === "string" ? ai.description : aiJson;
+  // Safety net: the Shafa prompt asks the AI to fold every concrete detail from the
+  // seller's additional description (waist width, sleeve length, pockets, …) into the
+  // description. If it didn't (the AI text doesn't already contain it), append it
+  // verbatim so those details never get dropped from the listing.
+  const extraDesc = (product.description || "").trim();
+  if (extraDesc) {
+    const descLc = description.toLowerCase();
+    const probe = extraDesc.toLowerCase().slice(0, 40);
+    if (!descLc.includes(probe)) {
+      description = `${description.trim()}\n\n${extraDesc}`;
+    }
+  }
   const keywords = Array.isArray(ai.keywords) ? (ai.keywords as string[]) : fallbackKeywords(product.title, product.description || "");
   const colors = Array.isArray(ai.colors) ? (ai.colors as string[]).slice(0, 2) : [];
 
