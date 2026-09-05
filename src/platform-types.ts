@@ -22,6 +22,9 @@ export type ProductInput = {
   model?: string;
   price: string;
   dropPrice?: string;
+  // Product-level price markup % (positive = markup, negative = discount), added
+  // on top of any per-platform markup from settings. 0/undefined = no change.
+  priceMarkup?: number;
   sizes?: string;
   sizeSystem?: string;
   colors?: string;

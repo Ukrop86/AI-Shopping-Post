@@ -499,6 +499,7 @@ function getFormPayload() {
     model: data.model || "",
     price: data.price || "",
     dropPrice: data.dropPrice || "",
+    priceMarkup: data.priceMarkup || "",
     sizes: data.sizes || "",
     sizeSystem: data.sizeSystem || "Міжнародний",
     colors: data.colors || "",
@@ -1175,7 +1176,7 @@ async function schedulePost(post) {
 
 // ── Event listeners ───────────────────────────────────────
 photosInput.addEventListener("change", () => {
-  selectedPhotoFiles = [...selectedPhotoFiles, ...(photosInput.files || [])].slice(0, 6);
+  selectedPhotoFiles = [...selectedPhotoFiles, ...(photosInput.files || [])].slice(0, 10);
   setInputFiles(photosInput, selectedPhotoFiles);
   renderLocalGallery();
 });

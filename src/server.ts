@@ -88,9 +88,9 @@ const upload = multer({
     cb(new Error("Дозволені лише файли зображень або відео"));
   },
 });
-const uploadPhotos = upload.array("photos", 6);
+const uploadPhotos = upload.array("photos", 10);
 const uploadCompat = upload.fields([
-  { name: "photos", maxCount: 6 },
+  { name: "photos", maxCount: 10 },
   { name: "photo", maxCount: 1 },
   { name: "video", maxCount: 1 },
 ]);
@@ -227,7 +227,7 @@ function getUploadedFiles(req: Request) {
   return [
     ...(groupedFiles?.photos || []),
     ...(groupedFiles?.photo || []),
-  ].slice(0, 6);
+  ].slice(0, 10);
 }
 
 function getUploadedVideo(req: Request) {
@@ -276,6 +276,7 @@ function productInputFromBody(
     colors: toText(body.colors),
     fabric: toText(body.fabric),
     description: toText(body.description),
+    priceMarkup: Number(body.priceMarkup) || 0,
     imageUrls: images.map((image) => image.imageUrl),
     photoPaths: images.map((image) => image.photoPath),
     videoUrl: video?.videoUrl || toText(body.videoUrl) || undefined,
@@ -403,6 +404,21 @@ async function getPlatformMarkups(db: any, userId: number): Promise<Record<strin
   return parsePlatformMarkups(row?.platform_markups);
 }
 
+// Total markup per platform = the product-level markup (entered next to the price)
+// plus that platform's own markup from settings. Both may be positive or negative.
+function combineMarkups(
+  productMarkup: number,
+  platformMarkups: Record<string, number>,
+  platformIds: PlatformId[]
+): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const p of platformIds) {
+    const total = (productMarkup || 0) + (platformMarkups[p] || 0);
+    if (total) out[p] = total;
+  }
+  return out;
+}
+
 async function getUserSettings(db: any, userId: number) {
   const settings = await db.get(`SELECT * FROM user_settings WHERE user_id = ?`, [userId]);
   const env = readEnv();
@@ -458,7 +474,8 @@ async function insertProduct(
 ) {
   const now = new Date().toISOString();
   const productWithSettings = await withUserSettings(db, userId, product);
-  const markups = await getPlatformMarkups(db, userId);
+  const platformMarkups = await getPlatformMarkups(db, userId);
+  const markups = combineMarkups(Number(product.priceMarkup) || 0, platformMarkups, platformIds);
   const generatedPosts = await generatePostsForPlatforms(productWithSettings, platformIds, markups as any);
   const telegramDraft = generatedPosts.find((post) => post.platform === "telegram");
   const firstImage = images[0];
@@ -489,11 +506,12 @@ async function insertProduct(
       shopName,
       shopDescription,
       shopLanguage,
+      priceMarkup,
       generatedPost,
       telegramPublished,
       telegramChatId,
       telegramMessageId
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, NULL)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, NULL)
     `,
     [
       String(userId),
@@ -520,6 +538,7 @@ async function insertProduct(
       productWithSettings.shopName || null,
       productWithSettings.shopDescription || null,
       productWithSettings.shopLanguage || "uk",
+      Number(productWithSettings.priceMarkup) || 0,
       telegramDraft?.text || null,
     ]
   );
@@ -569,6 +588,7 @@ async function updateProductFields(db: any, productId: number, body: any) {
         colors = ?,
         fabric = ?,
         description = ?,
+        priceMarkup = ?,
         videoStyle = ?,
         useProcessedVideo = ?,
         generateVideo = ?,
@@ -585,6 +605,7 @@ async function updateProductFields(db: any, productId: number, body: any) {
       toText(body.colors),
       toText(body.fabric),
       toText(body.description),
+      Number(body.priceMarkup) || 0,
       toText(body.videoStyle) || "fashion",
       body.useProcessedVideo === "0" || body.useProcessedVideo === false ? 0 : 1,
       body.generateVideo === "off" || body.generateVideo === "0" ? 0 : 1,
@@ -706,11 +727,13 @@ async function startServer() {
           }
         ));
         const now = new Date().toISOString();
-        const markups = await getPlatformMarkups(db, currentUserId(req));
+        const platformMarkups = await getPlatformMarkups(db, currentUserId(req));
+        const productMarkup = Number(product.priceMarkup) || 0;
         const updatedPosts = [];
 
         for (const platform of platformIds) {
-          const text = await generatePlatformPost(applyProductMarkup(product, markups[platform]), platform);
+          const totalMarkup = productMarkup + (platformMarkups[platform] || 0);
+          const text = await generatePlatformPost(applyProductMarkup(product, totalMarkup), platform);
           const existing = nextDetails!.platformPosts.find(
             (post: any) => post.platform === platform
           );

@@ -56,7 +56,7 @@
               <input type="file" id="photos" name="photos" accept="image/*" multiple />
               <div class="upload-icon">🖼</div>
               <strong>Фото товару</strong>
-              <small>До 6 зображень. Перше — головне.</small>
+              <small>До 10 зображень. Перше — головне.</small>
             </label>
 
             <label class="upload-box video-upload-box">
@@ -140,6 +140,10 @@
             <label>
               Ціна
               <input type="text" name="price" placeholder="980 грн" required />
+            </label>
+            <label>
+              Націнка, % (+ націнка / − знижка)
+              <input type="number" name="priceMarkup" placeholder="0" min="-99" max="1000" step="1" />
             </label>
             <label>
               Дроп ціна
