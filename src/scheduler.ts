@@ -203,9 +203,21 @@ export async function publishPlatformPost(db: Db, postId: number, extras?: Recor
     ? parseInt(productRow.userId, 10) : null;
   const userTokens = numericUserId ? await getUserTokens(db, numericUserId) : null;
   if (numericUserId && userTokens) {
-    const settings = await db.get(`SELECT telegram_chat_id FROM user_settings WHERE user_id = ?`, [numericUserId]);
+    const settings = await db.get(
+      `SELECT telegram_chat_id, telegram_order_login, telegram_social_links FROM user_settings WHERE user_id = ?`,
+      [numericUserId]
+    );
     if (settings?.telegram_chat_id) {
-      userTokens.telegram = { chatId: settings.telegram_chat_id };
+      let socialLinks: string[] | undefined;
+      try {
+        const parsed = settings.telegram_social_links ? JSON.parse(settings.telegram_social_links) : null;
+        if (Array.isArray(parsed)) socialLinks = parsed.map((s: unknown) => String(s)).filter(Boolean);
+      } catch { /* malformed JSON — ignore, just omit social links */ }
+      userTokens.telegram = {
+        chatId: settings.telegram_chat_id,
+        orderLogin: settings.telegram_order_login || undefined,
+        socialLinks,
+      };
     }
     // TikTok access tokens are short-lived; refresh proactively so scheduled/queued
     // posts don't fail with a stale token for accounts connected a while ago.

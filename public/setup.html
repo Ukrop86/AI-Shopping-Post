@@ -471,6 +471,34 @@
               </div>
             </div>
 
+            <div class="step">
+              <div class="step-left">
+                <div class="step-num" id="tg-s3">3</div>
+              </div>
+              <div class="step-body">
+                <div class="step-title">✍️ Контакт для замовлень і соцмережі</div>
+                <div class="step-desc">
+                  Логін, кому писати, стане кнопкою <b>«✍️ Написати»</b> під постом.
+                  Посилання на соцмережі показуються в кінці поста — перед хештегами.
+                </div>
+                <div class="field" style="margin-top:12px">
+                  <label>Логін для кнопки (кому писати)</label>
+                  <input type="text" id="tg-order-login" placeholder="@my_manager або my_manager" autocomplete="off" />
+                  <div class="hint">Твій Telegram-нік або нік менеджера. Кнопка веде на t.me/цей_нік.</div>
+                </div>
+                <div class="field" style="margin-top:12px">
+                  <label>Посилання на соцмережі (можна кілька)</label>
+                  <div id="tg-social-list"></div>
+                  <button type="button" class="btn ghost" onclick="tgAddSocial()" style="margin-top:6px">➕ Додати посилання</button>
+                  <div class="hint">Instagram, TikTok, Facebook, YouTube, Prom, Rozetka тощо — назва підбереться автоматично за посиланням.</div>
+                </div>
+                <div style="display:flex;gap:8px;margin-top:12px">
+                  <button class="btn secondary" onclick="tgSaveContacts()">Зберегти контакти</button>
+                </div>
+                <div id="tg-contacts-hint" style="display:none;font-size:12px;margin-top:6px"></div>
+              </div>
+            </div>
+
           </div>
         </div>
       </div>
@@ -1507,7 +1535,61 @@ async function loadTgStatus() {
       <div class="detail" style="color:var(--text2)">Власник сервісу має встановити BOT_TOKEN у налаштуваннях Railway.</div></div>`;
   }
   if (s.chatId) document.getElementById("tg-chat-id").value = s.chatId;
+  document.getElementById("tg-order-login").value = s.orderLogin || "";
+  tgRenderSocials(s.socialLinks);
   return s;
+}
+
+function tgSocialRow(value) {
+  const wrap = document.createElement("div");
+  wrap.className = "field-row";
+  wrap.style.marginBottom = "6px";
+  const input = document.createElement("input");
+  input.type = "text";
+  input.placeholder = "https://instagram.com/... , https://tiktok.com/@...";
+  input.value = value || "";
+  input.style.flex = "1";
+  const rm = document.createElement("button");
+  rm.type = "button";
+  rm.className = "btn ghost";
+  rm.textContent = "✕";
+  rm.style.flexShrink = "0";
+  rm.onclick = () => wrap.remove();
+  wrap.appendChild(input);
+  wrap.appendChild(rm);
+  return wrap;
+}
+
+function tgAddSocial(value) {
+  document.getElementById("tg-social-list").appendChild(tgSocialRow(value));
+}
+
+function tgRenderSocials(list) {
+  const box = document.getElementById("tg-social-list");
+  if (!box) return;
+  box.innerHTML = "";
+  const arr = Array.isArray(list) ? list.filter(Boolean) : [];
+  if (arr.length) arr.forEach((u) => box.appendChild(tgSocialRow(u)));
+  else box.appendChild(tgSocialRow(""));
+}
+
+function tgCollectSocials() {
+  return Array.from(document.querySelectorAll("#tg-social-list input"))
+    .map((i) => i.value.trim())
+    .filter(Boolean);
+}
+
+async function tgSaveContacts() {
+  const orderLogin = document.getElementById("tg-order-login").value.trim();
+  const socialLinks = tgCollectSocials();
+  const hint = document.getElementById("tg-contacts-hint");
+  const r = await fetch("/api/telegram/save", {
+    method: "POST", headers: { "Content-Type": "application/json", ...authHeaders() },
+    body: JSON.stringify({ orderLogin, socialLinks }),
+  }).then((r) => r.json());
+  hint.style.display = "block";
+  if (r.success) { hint.style.color = "#3fb950"; hint.textContent = "✓ Збережено!"; }
+  else { hint.style.color = "#f85149"; hint.textContent = "Помилка: " + (r.message || "невідома"); }
 }
 
 function tgChanged() {

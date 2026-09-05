@@ -159,6 +159,11 @@ export async function initDb() {
   await ensureColumn(db, "products", "shopDescription", "TEXT");
   await ensureColumn(db, "products", "shopLanguage", "TEXT");
   await ensureColumn(db, "user_settings", "telegram_chat_id", "TEXT");
+  // Telegram post extras: the contact username the "✍️ Написати" button links to,
+  // and a JSON array of the seller's social/marketplace URLs shown in the post body
+  // (right before the hashtags). Both are Telegram-only and optional.
+  await ensureColumn(db, "user_settings", "telegram_order_login", "TEXT");
+  await ensureColumn(db, "user_settings", "telegram_social_links", "TEXT");
   await ensureColumn(db, "user_social_tokens", "login", "TEXT");
   await ensureColumn(db, "user_social_tokens", "meta", "TEXT");
   // Generic one-account-one-user identifier for platforms without a dedicated

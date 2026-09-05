@@ -3,7 +3,7 @@ import crypto from "crypto";
 export interface FbCreds { pageId: string; accessToken: string; pageName: string }
 export interface IgCreds { userId: string; accessToken: string }
 export interface TtCreds { accessToken: string; refreshToken: string; openId: string; expiresAt: number; refreshExpiresAt: number }
-export interface TelegramCreds { chatId: string }
+export interface TelegramCreds { chatId: string; orderLogin?: string; socialLinks?: string[] }
 export interface PromCreds { accessToken: string; categoryId?: number; categoryName?: string }
 export interface OlxCreds { accessToken: string; refreshToken?: string; expiresAt?: number; categoryId?: number }
 export interface RozetkaCreds { accessToken: string; categoryId?: number; categoryName?: string }

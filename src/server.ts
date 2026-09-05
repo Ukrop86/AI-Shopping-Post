@@ -369,6 +369,16 @@ async function getOwnedPlatformPost(db: any, postId: number, userId: number) {
   );
 }
 
+function parseSocialLinks(raw: unknown): string[] {
+  if (typeof raw !== "string" || !raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.map((s: unknown) => String(s).trim()).filter(Boolean) : [];
+  } catch {
+    return [];
+  }
+}
+
 async function getUserSettings(db: any, userId: number) {
   const settings = await db.get(`SELECT * FROM user_settings WHERE user_id = ?`, [userId]);
   const env = readEnv();
@@ -380,6 +390,8 @@ async function getUserSettings(db: any, userId: number) {
     facebookPageUrl: settings?.facebook_page_url || g("FACEBOOK_PAGE_URL"),
     instagramUrl: settings?.instagram_url || g("INSTAGRAM_URL"),
     telegramChatId: settings?.telegram_chat_id || "",
+    telegramOrderLogin: settings?.telegram_order_login || "",
+    telegramSocialLinks: parseSocialLinks(settings?.telegram_social_links),
   };
 }
 
@@ -771,7 +783,12 @@ async function startServer() {
         post.externalChatId &&
         post.externalPostId
       ) {
-        await editTelegramPost(text, post.externalChatId, post.externalPostId);
+        const s = await getUserSettings(db, currentUserId(req));
+        await editTelegramPost(text, post.externalChatId, post.externalPostId, "caption", {
+          chatId: s.telegramChatId,
+          orderLogin: s.telegramOrderLogin,
+          socialLinks: s.telegramSocialLinks,
+        });
       }
 
       const updated = await db.get(`SELECT * FROM platform_posts WHERE id = ?`, [
@@ -1148,10 +1165,13 @@ async function startServer() {
         telegramPost.externalChatId &&
         telegramPost.externalPostId
       ) {
+        const s = await getUserSettings(db, currentUserId(req));
         await editTelegramPost(
           toText(req.body.generatedPost),
           telegramPost.externalChatId,
-          telegramPost.externalPostId
+          telegramPost.externalPostId,
+          "caption",
+          { chatId: s.telegramChatId, orderLogin: s.telegramOrderLogin, socialLinks: s.telegramSocialLinks }
         );
       }
 
@@ -1705,11 +1725,12 @@ async function startServer() {
     const token = process.env.BOT_TOKEN;
     const settings = await getUserSettings(db, currentUserId(req));
     const chatId = settings.telegramChatId || "";
-    if (!token) return res.json({ connected: false, hasChatId: !!chatId });
+    const contacts = { orderLogin: settings.telegramOrderLogin, socialLinks: settings.telegramSocialLinks };
+    if (!token) return res.json({ connected: false, hasChatId: !!chatId, ...contacts });
     try {
       const r = await fetch(`https://api.telegram.org/bot${token}/getMe`);
       const d = await r.json() as any;
-      if (!d.ok) return res.json({ connected: false, hasChatId: !!chatId, error: d.description });
+      if (!d.ok) return res.json({ connected: false, hasChatId: !!chatId, error: d.description, ...contacts });
 
       let chatReachable = false;
       let chatError: string | undefined;
@@ -1732,23 +1753,35 @@ async function startServer() {
         chatId,
         chatReachable,
         chatError,
+        ...contacts,
       });
-    } catch (e) { res.json({ connected: false, hasChatId: !!chatId }); }
+    } catch (e) { res.json({ connected: false, hasChatId: !!chatId, ...contacts }); }
   });
 
   app.post("/api/telegram/save", ...requireUser, async (req: Request, res: Response) => {
-    const { chatId } = req.body as { chatId?: string };
+    const body = req.body as { chatId?: string; orderLogin?: string; socialLinks?: unknown };
+    const userId = currentUserId(req);
     const now = new Date().toISOString();
+    // Merge with existing so the separate "save channel" and "save contacts" actions
+    // in the UI don't wipe each other's fields when only one is sent.
+    const current = await getUserSettings(db, userId);
+    const chatId = body.chatId !== undefined ? toText(body.chatId) : current.telegramChatId;
+    const orderLogin = body.orderLogin !== undefined ? toText(body.orderLogin) : current.telegramOrderLogin;
+    const socialLinks = body.socialLinks !== undefined
+      ? JSON.stringify((Array.isArray(body.socialLinks) ? body.socialLinks : []).map((s) => String(s).trim()).filter(Boolean))
+      : JSON.stringify(current.telegramSocialLinks);
     try {
       await db.run(
         `
-        INSERT INTO user_settings (user_id, telegram_chat_id, created_at, updated_at)
-        VALUES (?, ?, ?, ?)
+        INSERT INTO user_settings (user_id, telegram_chat_id, telegram_order_login, telegram_social_links, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?)
         ON CONFLICT(user_id) DO UPDATE SET
           telegram_chat_id = excluded.telegram_chat_id,
+          telegram_order_login = excluded.telegram_order_login,
+          telegram_social_links = excluded.telegram_social_links,
           updated_at = excluded.updated_at
         `,
-        [currentUserId(req), toText(chatId), now, now]
+        [userId, chatId, orderLogin, socialLinks, now, now]
       );
       res.json({ success: true });
     } catch (err) {
