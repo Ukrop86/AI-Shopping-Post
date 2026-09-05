@@ -79,15 +79,41 @@ export async function generatePlatformPost(
   return response.output_text.trim();
 }
 
+// Applies a percentage markup to a price string, preserving whatever currency
+// text surrounds the number (e.g. "980 грн" + 10% → "1078 грн"). Handles spaces
+// as thousand separators and comma/dot decimals; rounds to a whole unit. Returns
+// the input unchanged when there's no markup or no parseable number.
+export function applyPriceMarkup(price: string | undefined, pct: number): string {
+  const raw = (price ?? "").toString();
+  if (!raw || !pct) return raw;
+  const match = raw.match(/\d[\d\s.,]*\d|\d/);
+  if (!match) return raw;
+  const numStr = match[0];
+  const value = parseFloat(numStr.replace(/\s/g, "").replace(",", "."));
+  if (!isFinite(value)) return raw;
+  const marked = Math.round(value * (1 + pct / 100));
+  return raw.replace(numStr, String(marked));
+}
+
+export function applyProductMarkup(product: ProductInput, pct?: number): ProductInput {
+  if (!pct) return product;
+  return {
+    ...product,
+    price: applyPriceMarkup(product.price, pct),
+    dropPrice: product.dropPrice ? applyPriceMarkup(product.dropPrice, pct) : product.dropPrice,
+  };
+}
+
 export async function generatePostsForPlatforms(
   product: ProductInput,
-  platformIds: PlatformId[]
+  platformIds: PlatformId[],
+  markups?: Partial<Record<PlatformId, number>>
 ) {
   const uniquePlatformIds = Array.from(new Set(platformIds));
   const posts = await Promise.all(
     uniquePlatformIds.map(async (platform) => ({
       platform,
-      text: await generatePlatformPost(product, platform),
+      text: await generatePlatformPost(applyProductMarkup(product, markups?.[platform]), platform),
       status: "draft" as const,
     }))
   );

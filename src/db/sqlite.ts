@@ -164,6 +164,9 @@ export async function initDb() {
   // (right before the hashtags). Both are Telegram-only and optional.
   await ensureColumn(db, "user_settings", "telegram_order_login", "TEXT");
   await ensureColumn(db, "user_settings", "telegram_social_links", "TEXT");
+  // Per-platform price markup: JSON map { platformId: percent } applied to the
+  // entered price (and drop price) when generating that platform's post text.
+  await ensureColumn(db, "user_settings", "platform_markups", "TEXT");
   await ensureColumn(db, "user_social_tokens", "login", "TEXT");
   await ensureColumn(db, "user_social_tokens", "meta", "TEXT");
   // Generic one-account-one-user identifier for platforms without a dedicated

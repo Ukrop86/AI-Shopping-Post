@@ -9,6 +9,7 @@ import {
   generatePlatformPost,
   generatePostsForPlatforms,
   generateVideoTexts,
+  applyProductMarkup,
 } from "./ai-generator";
 import { initDb } from "./db/sqlite";
 import { editTelegramPost } from "./telegram";
@@ -379,6 +380,28 @@ function parseSocialLinks(raw: unknown): string[] {
   }
 }
 
+// Parses the per-platform markup map, keeping only finite non-negative numbers.
+function parsePlatformMarkups(raw: unknown): Record<string, number> {
+  if (typeof raw !== "string" || !raw) return {};
+  try {
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") return {};
+    const out: Record<string, number> = {};
+    for (const [k, v] of Object.entries(parsed)) {
+      const n = Number(v);
+      if (isFinite(n) && n > 0) out[k] = n;
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+async function getPlatformMarkups(db: any, userId: number): Promise<Record<string, number>> {
+  const row = await db.get(`SELECT platform_markups FROM user_settings WHERE user_id = ?`, [userId]);
+  return parsePlatformMarkups(row?.platform_markups);
+}
+
 async function getUserSettings(db: any, userId: number) {
   const settings = await db.get(`SELECT * FROM user_settings WHERE user_id = ?`, [userId]);
   const env = readEnv();
@@ -434,7 +457,8 @@ async function insertProduct(
 ) {
   const now = new Date().toISOString();
   const productWithSettings = await withUserSettings(db, userId, product);
-  const generatedPosts = await generatePostsForPlatforms(productWithSettings, platformIds);
+  const markups = await getPlatformMarkups(db, userId);
+  const generatedPosts = await generatePostsForPlatforms(productWithSettings, platformIds, markups as any);
   const telegramDraft = generatedPosts.find((post) => post.platform === "telegram");
   const firstImage = images[0];
   const result = await db.run(
@@ -681,10 +705,11 @@ async function startServer() {
           }
         ));
         const now = new Date().toISOString();
+        const markups = await getPlatformMarkups(db, currentUserId(req));
         const updatedPosts = [];
 
         for (const platform of platformIds) {
-          const text = await generatePlatformPost(product, platform);
+          const text = await generatePlatformPost(applyProductMarkup(product, markups[platform]), platform);
           const existing = nextDetails!.platformPosts.find(
             (post: any) => post.platform === platform
           );
@@ -1717,6 +1742,39 @@ async function startServer() {
       ]
     );
     res.json({ success: true });
+  });
+
+  // ── Per-platform price markup ───────────────────────────────────────────────
+
+  app.get("/api/settings/markups", ...requireUser, async (req: Request, res: Response) => {
+    res.json({ markups: await getPlatformMarkups(db, currentUserId(req)) });
+  });
+
+  app.post("/api/settings/markup", ...requireUser, async (req: Request, res: Response) => {
+    const { platform, percent } = req.body as { platform?: string; percent?: unknown };
+    if (!platform || !isPlatformId(platform)) {
+      return res.status(400).json({ success: false, message: "Невідома платформа" });
+    }
+    const pct = Number(percent);
+    if (!isFinite(pct) || pct < 0 || pct > 1000) {
+      return res.status(400).json({ success: false, message: "Націнка має бути числом від 0 до 1000" });
+    }
+    const userId = currentUserId(req);
+    const markups = await getPlatformMarkups(db, userId);
+    if (pct > 0) markups[platform] = pct;
+    else delete markups[platform]; // 0 = no markup, don't store it
+    const now = new Date().toISOString();
+    await db.run(
+      `
+      INSERT INTO user_settings (user_id, platform_markups, created_at, updated_at)
+      VALUES (?, ?, ?, ?)
+      ON CONFLICT(user_id) DO UPDATE SET
+        platform_markups = excluded.platform_markups,
+        updated_at = excluded.updated_at
+      `,
+      [userId, JSON.stringify(markups), now, now]
+    );
+    res.json({ success: true, markups });
   });
 
   // ── Telegram setup ─────────────────────────────────────────────────────────
