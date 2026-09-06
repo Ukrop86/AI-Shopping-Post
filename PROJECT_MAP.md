@@ -51,6 +51,7 @@ Instagram, TikTok, Shafa.ua, Prom.ua, OLX, Rozetka, Kasta.ua**. Деплой н�
 | `app.html` + `app.js` | **Кабінет** — створення товару: завантаження фото/відео, поля (вкл. «Націнка, %» біля ціни), вибір платформ (чекбокси), прев'ю, редагування текстів, публікація. До 10 фото. |
 | `setup.html` | **Налаштування** — усі вкладки підключення платформ (OAuth/токени, категорії), Telegram-контакти (логін+соцпосилання), націнка per-platform (інжектиться в кожну вкладку через `injectMarkupControls`). Найбільший фронт-файл. |
 | `products.html` + `products.js` | Історія публікацій, фільтри, редагування товарів. Тут же збирається **добірка**: чекбокси «У добірку» на картках + панель `#bundleBar`. |
+| `instagram.html` + `instagram.js` | **Instagram-студія.** Завантаження фото/відео → фонова підготовка всіх форматів → список товарів, де кожен розгортається в картки Reels / Reels-слайдшоу / Карусель / Сторіз: прев'ю медіа, підпис, свій час публікації і кнопки. Опитує `studioStatus`, поки медіа збирається. |
 | `stats.html` | Статистика (KPI, графіки по платформах). `platformMeta` — іконки платформ. |
 | `login.html` | Вхід/реєстрація (`?tab=register`). |
 | `facebook-setup.html` | Окрема сторінка майстра Facebook OAuth. |
@@ -81,7 +82,7 @@ Instagram, TikTok, Shafa.ua, Prom.ua, OLX, Rozetka, Kasta.ua**. Деплой н�
 | `user_settings` | 1 рядок на юзера. `shop_name/description/language`, `facebook_page_url`, `instagram_url`, `telegram_chat_id`, **`telegram_order_login`** (логін для кнопки), **`telegram_social_links`** (JSON-масив), **`platform_markups`** (JSON `{платформа: %}`). Унікальний індекс на `telegram_chat_id`. |
 | `products` | Товар. `title, price, dropPrice, sizes, sizeSystem, colors, fabric, description, model, imageUrl, photoPath, video*`, `videoStyle`, `shopName/Description/Language`, **`priceMarkup`** (REAL, ±%), **`slideshowVideoPath/Url`** (Reels із фото), **`storyImagePath/Url`** (кадр для сторіз), **`bundleOf`** (JSON-масив id товарів — ознака добірки), `userId`, `generatedPost` (telegram-чернетка). |
 | `product_images` | Фото товару (багато-до-одного): `productId, imageUrl, photoPath, sortOrder`, **`igImagePath/igImageUrl`** (копія під вимоги Instagram; порожньо = ще не оброблено). |
-| `platform_posts` | Пост на платформу (1 рядок на product×platform). `platform, text, status (draft/scheduled/publishing/published/failed), scheduledAt, publishedAt, externalPostId, externalChatId, errorMessage, platformSettings (JSON), platformStatus (JSON)`. |
+| `platform_posts` | Пост на платформу. `platform, text, status (draft/scheduled/publishing/published/failed), scheduledAt, publishedAt, externalPostId, externalChatId, errorMessage, platformSettings (JSON), platformStatus (JSON)`, **`formatKey`**. Для Instagram-студії рядків кілька на один товар — по одному на формат (`formatKey`); порожній `formatKey` = пост зі старого кабінету, де формат один на платформу. |
 
 ## Каталог API-роутів (`src/server.ts`)
 
@@ -91,7 +92,7 @@ Instagram, TikTok, Shafa.ua, Prom.ua, OLX, Rozetka, Kasta.ua**. Деплой н�
 
 | Група | Роути |
 |-------|-------|
-| Товари/прев'ю | `POST /api/posts/preview`, `POST /api/posts/:productId/regenerate`, `GET/PUT /api/products/:id`, `GET /api/products`, `PUT /api/products/:id/video-choice`, **`POST /api/products/:id/instagram-media`** (`slideshow` / `story` / `carousel` — збирає слайдшоу-Reels, кадр сторіз або приводить фото до вимог IG), **`POST /api/products/bundle`** (добірка з 2–6 товарів → товар-добірка + слайдшоу + чернетка поста), `POST /api/products/:id/publish`, legacy `/preview-post`, `/publish-preview`, `/products-api`. |
+| Товари/прев'ю | `POST /api/posts/preview`, `POST /api/posts/:productId/regenerate`, `GET/PUT /api/products/:id`, `GET /api/products`, `PUT /api/products/:id/video-choice`, **`POST /api/products/:id/instagram-media`** (`slideshow` / `story` / `carousel` — збирає слайдшоу-Reels, кадр сторіз або приводить фото до вимог IG), **`POST /api/products/bundle`** (добірка з 2–6 товарів → товар-добірка + слайдшоу + чернетка поста), **`POST /api/instagram/studio`** (завантаження → товар + фонова підготовка всіх форматів), **`GET /api/instagram/studio`** / **`GET /api/instagram/studio/:id`** (список і опитування стану), **`POST /api/instagram/studio/:id/rebuild`**, `POST /api/products/:id/publish`, legacy `/preview-post`, `/publish-preview`, `/products-api`. |
 | Пости | `PUT /api/platform-posts/:id`, `POST /api/platform-posts/:id/publish`, `GET /api/platform-posts/:id/status`. |
 | Акаунт/статус | `GET /api/user/social-status`, `DELETE /api/user/social/:platform`, `DELETE /api/account`, `GET /api/stats/summary`. |
 | Налаштування | `GET/POST /api/settings/shop`, `GET /api/settings/markups`, `POST /api/settings/markup`. |
@@ -126,6 +127,7 @@ Instagram, TikTok, Shafa.ua, Prom.ua, OLX, Rozetka, Kasta.ua**. Деплой н�
 - **Секрети (обов'язково в проді):** `JWT_SECRET`, `TOKEN_ENCRYPTION_KEY` (без них — публічний дефолт із коду). Опис змінних — у `CLAUDE.md`.
 - **Instagram/TikTok** потребують публічний HTTPS `SITE_URL` для медіа.
 - **Формат поста в Instagram** зберігається в `platform_posts.platformSettings` (`{format}`) і обирається у вкладці Instagram. `auto` = історична поведінка (формат за набором медіа). Карусель із відео першим слайдом **не потрапляє в стрічку Reels** — для охоплення потрібен `reels` або `slideshow`.
+- **Карусель вирівнюється по пропорціях:** Instagram обрізає ВСІ слайди під співвідношення першого кадру, тож студія зводить усі фото каруселі до однакових пропорцій (`targetRatio`), інакше решті кадрів зрізає боки.
 - **Слайдшоу і кадр сторіз готуються на вимогу** (`/api/products/:id/instagram-media`) і лежать на товарі, щоб публікація за розкладом не чекала на ffmpeg у момент слоту.
 - **HEIC (фото з iPhone) ffmpeg у нашому образі не читає взагалі** — конвертуємо на завантаженні через `heif-convert` (`normalizeUploadedPhotos` у `server.ts`). Формат визначається за сигнатурою файлу, а не за mime-типом: браузери регулярно віддають HEIC як `image/jpeg`. Нечитабельні фото відхиляються одразу з поясненням, а не ламають публікацію потім.
 - **Instagram приймає тільки JPEG зі співвідношенням 4:5…1.91:1** (і до 8 МБ). PNG/WEBP і звичайне вертикальне фото 9:16 Graph API відхиляє, тому копії готуються у фоні одразу після створення товару (`prepareInstagramImages`) і зберігаються в `product_images.igImage*`. Зайву висоту добиваємо розмитим фоном, не обрізаємо.
@@ -138,6 +140,7 @@ Instagram, TikTok, Shafa.ua, Prom.ua, OLX, Rozetka, Kasta.ua**. Деплой н�
 - **Фото під вимоги Instagram:** автоматична конвертація в JPEG і приведення співвідношення сторін до 4:5…1.91:1.
 - **HEIC з iPhone:** конвертація на завантаженні + зрозуміла відмова, якщо файл не читається.
 - **Добірка з кількох товарів:** один Reels зі слайдшоу з фото 2–6 товарів (`/api/products/bundle`, вибір на сторінці товарів).
+- **Instagram-студія** (`/instagram.html`): одне завантаження → Reels, слайдшоу, карусель із написами на фото і кадр сторіз, кожен формат окремим постом зі своїм часом публікації.
 - **Графік публікацій** — `POSTING_SCHEDULE.md` (слоти тижня, типи товарів, безпечні ліміти).
 - **Kasta.ua** — дев'ята платформа.
 - **Безпека:** усунено reflected XSS (setup/facebook-setup), закрито незахищені адмін/debug-роути, обмеження типів файлів завантаження, оновлено вразливі залежності.

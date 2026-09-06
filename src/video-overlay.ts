@@ -467,7 +467,26 @@ export type InstagramImageInput = {
   inputPath: string;
   uploadsDir: string;
   index?: number;
+  // Напис, який треба запекти у фото (перший і останній слайди каруселі).
+  // Якщо він заданий, копія робиться завжди — навіть коли оригінал і так
+  // відповідає вимогам Instagram.
+  overlayText?: string;
+  videoStyle?: VideoStyle;
+  // Точні пропорції, до яких треба привести кадр. Потрібні для каруселі:
+  // Instagram обрізає ВСІ слайди під співвідношення першого, тож різні
+  // пропорції всередині однієї каруселі означають зрізані боки на решті кадрів.
+  targetRatio?: number;
 };
+
+export async function imageAspectRatio(filePath: string) {
+  const image = await probeImage(filePath);
+  if (!image.width || !image.height) throw new Error("Не вдалося прочитати розміри фото");
+  return image.width / image.height;
+}
+
+export function clampInstagramRatio(ratio: number) {
+  return Math.min(IG_MAX_RATIO, Math.max(IG_MIN_RATIO, ratio));
+}
 
 /**
  * Повертає null, якщо фото вже відповідає вимогам Instagram — тоді публікуємо
@@ -487,19 +506,28 @@ export async function createInstagramImage(input: InstagramImageInput) {
 
   const ratio = image.width / image.height;
   const isJpeg = image.codec === "mjpeg";
-  const ratioOk = ratio >= IG_MIN_RATIO && ratio <= IG_MAX_RATIO;
+  const target = input.targetRatio ? clampInstagramRatio(input.targetRatio) : null;
+  const ratioOk = target
+    ? Math.abs(ratio - target) < 0.005
+    : ratio >= IG_MIN_RATIO && ratio <= IG_MAX_RATIO;
 
-  if (isJpeg && ratioOk && size <= IG_MAX_BYTES && image.width <= IG_MAX_WIDTH) {
+  const overlayText = input.overlayText?.trim();
+
+  if (!overlayText && isJpeg && ratioOk && size <= IG_MAX_BYTES && image.width <= IG_MAX_WIDTH) {
     return null;
   }
 
   let width = image.width;
   let height = image.height;
 
-  if (ratio < IG_MIN_RATIO) {
-    width = Math.ceil(height * IG_MIN_RATIO);
-  } else if (ratio > IG_MAX_RATIO) {
-    height = Math.ceil(width / IG_MAX_RATIO);
+  // Без targetRatio правимо лише вихід за дозволені межі; з ним — доводимо
+  // кадр рівно до потрібних пропорцій. В обох випадках добиваємо полями,
+  // а не обрізаємо: обрізка з'їдає взуття й голову.
+  const wanted = target ?? clampInstagramRatio(ratio);
+  if (ratio < wanted) {
+    width = Math.ceil(height * wanted);
+  } else if (ratio > wanted) {
+    height = Math.ceil(width / wanted);
   }
 
   if (width > IG_MAX_WIDTH) {
@@ -515,11 +543,19 @@ export async function createInstagramImage(input: InstagramImageInput) {
   const outputName = `ig-${Date.now()}-${input.index ?? 0}.jpg`;
   const outputPath = path.join(input.uploadsDir, outputName);
 
+  const overlay = overlayText
+    ? buildDrawTextFilter(
+        { text: overlayText, start: 0, end: 1, position: "bottom" },
+        width,
+        input.videoStyle || "fashion"
+      )
+    : "";
+
   const chains = [
     `[0:v]scale=${width}:${height}:force_original_aspect_ratio=increase,` +
       `crop=${width}:${height},boxblur=20:3[bg]`,
     `[0:v]scale=${width}:${height}:force_original_aspect_ratio=decrease[fg]`,
-    `[bg][fg]overlay=(W-w)/2:(H-h)/2,setsar=1[out]`,
+    `[bg][fg]overlay=(W-w)/2:(H-h)/2,setsar=1${overlay ? `,${overlay}` : ""}[out]`,
   ];
 
   const render = async (quality: number) => {

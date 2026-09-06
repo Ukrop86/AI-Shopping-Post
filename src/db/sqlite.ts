@@ -168,6 +168,9 @@ export async function initDb() {
   await ensureColumn(db, "products", "storyImageUrl", "TEXT");
   // Товар-добірка: JSON-масив id товарів, з фото яких зібрано слайдшоу.
   await ensureColumn(db, "products", "bundleOf", "TEXT");
+  // Стан фонової підготовки медіа для Instagram-студії: preparing/ready/failed.
+  await ensureColumn(db, "products", "studioStatus", "TEXT");
+  await ensureColumn(db, "products", "studioError", "TEXT");
   await ensureColumn(db, "user_settings", "telegram_chat_id", "TEXT");
   // Telegram post extras: the contact username the "✍️ Написати" button links to,
   // and a JSON array of the seller's social/marketplace URLs shown in the post body
@@ -243,6 +246,10 @@ export async function initDb() {
   // пишеться сам оригінал.
   await ensureColumn(db, "product_images", "igImagePath", "TEXT");
   await ensureColumn(db, "product_images", "igImageUrl", "TEXT");
+  // Instagram-студія: кілька постів одного товару (по одному на формат), тому
+  // пара (товар, платформа) більше не унікальна — формат розрізняє рядки.
+  // Порожньо = пост зі старого кабінету, де формат один на платформу.
+  await ensureColumn(db, "platform_posts", "formatKey", "TEXT");
 
   // Platform-specific metadata stays on the individual post so scheduled
   // publishes use the exact settings the creator explicitly approved. TikTok

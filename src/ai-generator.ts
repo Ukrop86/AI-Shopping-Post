@@ -50,7 +50,20 @@ export async function generatePlatformPost(
   });
 
   const platform = getPlatform(platformId);
-  const prompt = platform.generatePrompt(product);
+  return generateWithPrompt(product, platform.generatePrompt(product));
+}
+
+// Той самий виклик, але з довільним промптом — потрібен там, де текст пишеться
+// не «під платформу», а під конкретний формат поста (Instagram-студія).
+export async function generateWithPrompt(product: ProductInput, prompt: string) {
+  if (!process.env.OPENAI_API_KEY) {
+    throw new Error("OPENAI_API_KEY не задано в .env");
+  }
+
+  openai ??= new OpenAI({
+    apiKey: process.env.OPENAI_API_KEY,
+  });
+
   const imageInputs = product.photoPaths
     .filter((photoPath) => fs.existsSync(photoPath))
     .slice(0, maxVisionImages)

@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Instagram-студія — Postly</title>
+  <link rel="stylesheet" href="/style.css" />
+  <link rel="icon" type="image/png" href="/logo-mark.png" />
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+</head>
+<body>
+  <div class="toast-container" id="toastContainer"></div>
+
+  <div class="app">
+    <header class="topbar">
+      <div class="topbar-left">
+        <div class="logo">
+          <img class="logo-icon" src="/logo-mark.png" alt="Postly" width="28" height="28" />
+          <span class="logo-name">Postly</span>
+        </div>
+        <div class="topbar-divider"></div>
+        <span class="badge">Instagram-студія</span>
+        <span class="topbar-desc">Reels, слайдшоу, карусель і сторіз з одного завантаження</span>
+      </div>
+      <button class="nav-toggle" onclick="document.getElementById('topbarNav').classList.toggle('open')" aria-label="Меню">☰</button>
+      <nav class="topbar-nav" id="topbarNav">
+        <a href="/app.html" class="btn ghost">Кабінет</a>
+        <a href="/products.html" class="btn ghost">Історія</a>
+        <a href="/stats.html" class="btn ghost">Статистика</a>
+        <a href="/setup.html" class="btn ghost">⚙ Налаштування</a>
+      </nav>
+    </header>
+
+    <div class="page-body">
+      <form id="studioForm" class="card form-card">
+        <div class="section-title">
+          <div class="section-label">
+            <span class="ico">📸</span>
+            <h2>Новий товар для Instagram</h2>
+          </div>
+          <button type="button" id="studioReset" class="btn ghost">Очистити</button>
+        </div>
+
+        <p class="studio-hint">
+          Завантаж фото і, якщо є, відео на моделі. Постли сам збере Reels із відео,
+          слайдшоу з фото, карусель із написами і кадр для сторіз — далі подивишся
+          зразки й даси кожному свій час публікації.
+        </p>
+
+        <div class="media-row">
+          <label class="upload-box">
+            <input type="file" id="studioPhotos" name="photos" accept="image/*" multiple />
+            <div class="upload-icon">🖼</div>
+            <strong>Фото товару</strong>
+            <small>До 10 зображень. Перше — головне.</small>
+          </label>
+
+          <label class="upload-box video-upload-box">
+            <input type="file" id="studioVideo" name="video" accept="video/mp4" />
+            <div class="upload-icon">▶</div>
+            <strong>Відео / Reels</strong>
+            <small>MP4 на моделі. Без нього Reels зробимо зі слайдшоу.</small>
+          </label>
+        </div>
+
+        <div id="studioGallery" class="photo-gallery"></div>
+
+        <div class="video-settings">
+          <div class="video-settings-head">
+            <div>
+              <strong>Стиль плашок</strong>
+              <small>Однаковий для відео, слайдшоу, фото каруселі та сторіз</small>
+            </div>
+          </div>
+          <div class="video-style-select">
+            <label class="video-style-card">
+              <input type="radio" name="videoStyle" value="fashion" checked />
+              <span class="style-preview fashion-preview"><b>Fashion</b><em>1290 грн</em></span>
+              <strong>Fashion</strong>
+              <small>Для більшості товарів</small>
+            </label>
+            <label class="video-style-card">
+              <input type="radio" name="videoStyle" value="minimal" />
+              <span class="style-preview minimal-preview"><b>Minimal</b><em>new drop</em></span>
+              <strong>Minimal</strong>
+              <small>Спокійний стиль</small>
+            </label>
+            <label class="video-style-card">
+              <input type="radio" name="videoStyle" value="premium" />
+              <span class="style-preview premium-preview"><b>Premium</b><em>limited</em></span>
+              <strong>Premium</strong>
+              <small>Дорожча подача</small>
+            </label>
+            <label class="video-style-card">
+              <input type="radio" name="videoStyle" value="sale" />
+              <span class="style-preview sale-preview"><b>SALE</b><em>-30%</em></span>
+              <strong>Sale</strong>
+              <small>Акції та знижки</small>
+            </label>
+          </div>
+        </div>
+
+        <div class="form-divider">Основна інформація</div>
+
+        <div class="grid">
+          <label>
+            Назва товару
+            <input type="text" name="title" placeholder="Костюм з льону" required />
+          </label>
+          <label>
+            Модель / артикул
+            <input type="text" name="model" placeholder="097" />
+          </label>
+          <label>
+            Ціна
+            <input type="text" name="price" placeholder="980 грн" required />
+          </label>
+          <label>
+            Націнка, % (+ націнка / − знижка)
+            <input type="number" name="priceMarkup" placeholder="0" min="-99" max="1000" step="1" />
+          </label>
+          <label>
+            Розміри
+            <input type="text" name="sizes" placeholder="S, M, L" />
+          </label>
+          <label>
+            Кольори
+            <input type="text" name="colors" placeholder="чорний, молочний" />
+          </label>
+        </div>
+
+        <label>
+          Тканина / матеріал
+          <input type="text" name="fabric" placeholder="фактурний льон" />
+        </label>
+
+        <label>
+          Додатковий опис
+          <textarea name="description" rows="3" placeholder="Особливості посадки, комплектація, нюанси..."></textarea>
+        </label>
+
+        <div class="actions">
+          <button type="submit" class="btn primary" id="studioSubmit">Підготувати пости</button>
+          <span class="studio-status" id="studioStatus"></span>
+        </div>
+      </form>
+
+      <section class="section-title studio-list-title">
+        <div class="section-label">
+          <span class="ico">🗂</span>
+          <h2>Підготовлені товари</h2>
+        </div>
+        <button type="button" id="studioRefresh" class="btn ghost">Оновити</button>
+      </section>
+
+      <section id="studioList" class="products-list">Завантаження...</section>
+    </div>
+
+    <footer class="legal-footer">
+      <a href="/privacy.html">Privacy Policy</a>
+      <a href="/terms.html">Terms of Service</a>
+      <a href="/data-deletion.html">Data Deletion</a>
+    </footer>
+  </div>
+
+  <script src="/instagram.js"></script>
+</body>
+</html>

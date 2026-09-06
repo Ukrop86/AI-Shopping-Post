@@ -165,6 +165,19 @@ stored as an ordinary product with `bundleOf` set, so it travels the same produc
 no special case in publishing. Its `product_images` rows reference the source products' files rather than
 copying them; the rendered reel is self-contained, so deleting a source product later doesn't break it.
 
+### Instagram studio (`public/instagram.html`, `/api/instagram/studio`)
+The Instagram-only workflow: one upload becomes every format at once. `prepareInstagramStudio` (server.ts)
+runs in the background — ffmpeg and the AI together take a minute or two, which is far too long to hold a
+request open — and the page polls `products.studioStatus` (`preparing` → `ready`/`failed`) until the cards
+can be drawn. It builds the slideshow reel, the story frame, the overlaid video and the carousel photos
+(captions burned into the first and last slide), then writes **one `platform_posts` row per format**,
+distinguished by `formatKey`. That is what lifts the old "one row per product×platform" limit: a single
+product now carries Reels, slideshow, carousel and story as separate posts, each with its own caption and
+its own `scheduledAt`. Captions are written per format (`instagramFormatPrompt`), because a Reel is read
+from its first line while a carousel is read by someone already interested; a story gets no caption at all.
+Carousel slides are all conformed to the **same** aspect ratio (`targetRatio`), since Instagram crops every
+slide to match the first one — mixed ratios silently cut the sides off the rest.
+
 The weekly posting plan these formats serve lives in `POSTING_SCHEDULE.md`.
 
 ## Environment variables

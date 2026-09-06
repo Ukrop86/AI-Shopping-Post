@@ -10,17 +10,20 @@ import {
   generatePlatformPost,
   generatePostsForPlatforms,
   generateVideoTexts,
+  generateWithPrompt,
   applyPriceMarkup,
   applyProductMarkup,
 } from "./ai-generator";
 import { initDb } from "./db/sqlite";
 import { editTelegramPost } from "./telegram";
-import { enabledPlatformIds, isPlatformId } from "./platforms";
+import { enabledPlatformIds, isPlatformId, instagramFormatPrompt } from "./platforms";
 import { PlatformId, ProductInput } from "./platform-types";
 import { publishPlatformPost, startScheduler, syncTikTokPublishingPost } from "./scheduler";
 import {
+  clampInstagramRatio,
   convertHeifToJpeg,
   createInstagramImage,
+  imageAspectRatio,
   createReelsStyleVideo,
   createSlideshowReel,
   createStoryFrame,
@@ -679,11 +682,31 @@ async function updateProductFields(db: any, productId: number, body: any) {
 // Instagram приймає тільки JPEG зі співвідношенням 4:5…1.91:1, тож PNG/WEBP і
 // звичайне вертикальне фото з телефона Graph API відхиляє. Готуємо копії заздалегідь
 // (у фоні після створення товару), щоб публікація за розкладом не впала на цьому.
-async function prepareInstagramImages(db: any, productId: number) {
+async function prepareInstagramImages(
+  db: any,
+  productId: number,
+  captions: Record<number, string> = {},
+  videoStyle: any = "fashion",
+  // Для каруселі всі слайди мають бути однакових пропорцій: Instagram обрізає
+  // решту кадрів під перший, тож інакше в частини фото зріже боки.
+  uniformRatio = false
+) {
   const images = await db.all(
     `SELECT id, photoPath, imageUrl FROM product_images WHERE productId = ? ORDER BY sortOrder ASC, id ASC`,
     [productId]
   );
+
+  let targetRatio: number | undefined;
+  if (uniformRatio) {
+    const firstPhoto = String(images[0]?.photoPath || "");
+    if (firstPhoto) {
+      try {
+        targetRatio = clampInstagramRatio(await imageAspectRatio(firstPhoto));
+      } catch (error) {
+        console.error("[Instagram] Не вдалося визначити пропорції першого фото:", error);
+      }
+    }
+  }
 
   let prepared = 0;
   for (const [index, image] of images.entries()) {
@@ -691,7 +714,14 @@ async function prepareInstagramImages(db: any, productId: number) {
     if (!photoPath) continue;
 
     try {
-      const converted = await createInstagramImage({ inputPath: photoPath, uploadsDir, index });
+      const converted = await createInstagramImage({
+        inputPath: photoPath,
+        uploadsDir,
+        index,
+        overlayText: captions[index],
+        videoStyle,
+        targetRatio,
+      });
       // Якщо конвертація не потрібна (оригінал уже відповідає вимогам), зайвого
       // файлу не створюємо, але колонки все одно заповнюємо оригіналом — так
       // порожнє значення однозначно означає «ще не оброблено».
@@ -717,6 +747,175 @@ function prepareInstagramImagesInBackground(db: any, productId: number) {
       console.log(`[Instagram] Фото товару ${productId}: підготовлено ${prepared} з ${total}`)
     )
     .catch((error) => console.error(`[Instagram] Підготовка фото товару ${productId} впала:`, error));
+}
+
+// ── Instagram-студія ─────────────────────────────────────────────────────────
+// Один товар → кілька постів Instagram, по одному на формат, кожен зі своїм
+// текстом, своїм готовим медіа і своїм часом публікації. Медіа готується у
+// фоні (ffmpeg + AI хвилину-дві), сторінка опитує стан і показує картки,
+// щойно все зібрано.
+
+const STUDIO_FORMATS = ["reels", "slideshow", "carousel", "story"] as const;
+type StudioFormat = (typeof STUDIO_FORMATS)[number];
+
+function productInputFromRow(product: any, images: any[]): ProductInput {
+  return {
+    title: product.title || "",
+    model: product.model || "",
+    price: product.price || "",
+    dropPrice: product.dropPrice || "",
+    sizes: product.sizes || "",
+    sizeSystem: product.sizeSystem || undefined,
+    colors: product.colors || "",
+    fabric: product.fabric || "",
+    description: product.description || "",
+    imageUrls: images.map((image) => image.imageUrl),
+    photoPaths: images.map((image) => String(image.photoPath || "")).filter(Boolean),
+    videoUrl: product.videoUrl || undefined,
+    videoPath: product.videoPath || undefined,
+    videoStyle: product.videoStyle || "fashion",
+    generateVideo: product.generateVideo !== 0,
+    priceMarkup: Number(product.priceMarkup) || 0,
+    shopName: product.shopName || undefined,
+    shopDescription: product.shopDescription || undefined,
+    shopLanguage: product.shopLanguage || undefined,
+  };
+}
+
+function studioFormatsFor(photoCount: number, hasVideo: boolean): StudioFormat[] {
+  const formats: StudioFormat[] = [];
+  if (hasVideo) formats.push("reels");
+  // Слайдшоу з одного кадру — це не відео, а картинка: сенсу немає.
+  if (photoCount >= 2) formats.push("slideshow");
+  if (photoCount >= 1) formats.push("carousel", "story");
+  return formats;
+}
+
+async function upsertStudioPost(db: any, productId: number, format: StudioFormat, text: string) {
+  const now = new Date().toISOString();
+  const existing = await db.get(
+    `SELECT id, status FROM platform_posts WHERE productId = ? AND platform = 'instagram' AND formatKey = ?`,
+    [productId, format]
+  );
+  const settings = JSON.stringify({ format });
+
+  if (existing) {
+    // Опублікований пост не чіпаємо — його вже видно в Instagram.
+    if (existing.status === "published") return;
+    await db.run(
+      `UPDATE platform_posts
+       SET text = ?, platformSettings = ?, status = CASE WHEN status = 'scheduled' THEN status ELSE 'draft' END,
+           errorMessage = NULL, updatedAt = ?
+       WHERE id = ?`,
+      [text, settings, now, existing.id]
+    );
+    return;
+  }
+
+  await db.run(
+    `INSERT INTO platform_posts (productId, platform, formatKey, text, status, platformSettings, createdAt, updatedAt)
+     VALUES (?, 'instagram', ?, ?, 'draft', ?, ?, ?)`,
+    [productId, format, text, settings, now, now]
+  );
+}
+
+async function prepareInstagramStudio(db: any, userId: number, productId: number) {
+  const started = new Date().toISOString();
+  await db.run(`UPDATE products SET studioStatus = 'preparing', studioError = NULL, updatedAt = ? WHERE id = ?`, [
+    started,
+    productId,
+  ]);
+
+  try {
+    const details = await getProductDetails(db, productId);
+    if (!details) throw new Error("Товар не знайдено");
+
+    const row = details.product;
+    const photoPaths = details.images.map((image: any) => String(image.photoPath || "")).filter(Boolean);
+    const hasVideo = !!row.videoPath;
+    const formats = studioFormatsFor(photoPaths.length, hasVideo);
+    if (!formats.length) throw new Error("Потрібне хоча б одне фото або відео товару");
+
+    const videoStyle = (row.videoStyle || "fashion") as any;
+    const platformMarkups = await getPlatformMarkups(db, userId);
+    const markup = (Number(row.priceMarkup) || 0) + (platformMarkups.instagram || 0);
+    const product = applyProductMarkup(productInputFromRow(row, details.images), markup);
+
+    // Короткі написи для кадрів — один виклик на товар, далі перевикористання
+    // у слайдшоу, сторіз і на фото каруселі.
+    let videoTexts;
+    try {
+      videoTexts = await generateVideoTexts(product);
+    } catch (error) {
+      console.error(`[Studio] Написи для товару ${productId} не згенерувались, беремо дефолтні:`, error);
+    }
+
+    const priceLine = [product.title, product.price].map((part) => String(part || "").trim()).filter(Boolean).join(" · ");
+
+    if (photoPaths.length) {
+      // Перший слайд каруселі несе назву й ціну, останній — заклик.
+      const captions: Record<number, string> = { 0: priceLine };
+      const closing = videoTexts?.[videoTexts.length - 1]?.text;
+      if (photoPaths.length > 1 && closing) captions[photoPaths.length - 1] = closing;
+      await prepareInstagramImages(db, productId, captions, videoStyle, true);
+
+      const story = await createStoryFrame({
+        inputPath: photoPaths[0],
+        uploadsDir,
+        overlayText: priceLine,
+        videoStyle,
+      });
+      await db.run(`UPDATE products SET storyImagePath = ?, storyImageUrl = ?, updatedAt = ? WHERE id = ?`, [
+        story.outputPath,
+        filePathToPublicUrl(story.outputPath),
+        new Date().toISOString(),
+        productId,
+      ]);
+    }
+
+    if (formats.includes("slideshow")) {
+      const slideshow = await createSlideshowReel({ photoPaths, uploadsDir, videoTexts, videoStyle });
+      await db.run(`UPDATE products SET slideshowVideoPath = ?, slideshowVideoUrl = ?, updatedAt = ? WHERE id = ?`, [
+        slideshow.outputPath,
+        filePathToPublicUrl(slideshow.outputPath),
+        new Date().toISOString(),
+        productId,
+      ]);
+    }
+
+    if (formats.includes("reels")) {
+      const processed = await generateProcessedVideo(product);
+      if (processed) {
+        await db.run(
+          `UPDATE products SET processedVideoPath = ?, processedVideoUrl = ?, useProcessedVideo = 1, updatedAt = ? WHERE id = ?`,
+          [processed.processedVideoPath, processed.processedVideoUrl, new Date().toISOString(), productId]
+        );
+      }
+    }
+
+    for (const format of formats) {
+      // У сторіз підпису немає взагалі — текст запечений у кадр.
+      const text =
+        format === "story"
+          ? ""
+          : await generateWithPrompt(product, instagramFormatPrompt(product, format));
+      await upsertStudioPost(db, productId, format, text);
+    }
+
+    await db.run(`UPDATE products SET studioStatus = 'ready', studioError = NULL, updatedAt = ? WHERE id = ?`, [
+      new Date().toISOString(),
+      productId,
+    ]);
+    console.log(`[Studio] Товар ${productId}: підготовлено формати ${formats.join(", ")}`);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`[Studio] Підготовка товару ${productId} впала:`, error);
+    await db.run(`UPDATE products SET studioStatus = 'failed', studioError = ?, updatedAt = ? WHERE id = ?`, [
+      message.slice(0, 500),
+      new Date().toISOString(),
+      productId,
+    ]);
+  }
 }
 
 async function generateProcessedVideo(product: ProductInput) {
@@ -1618,6 +1817,98 @@ async function startServer() {
     } catch (err) {
       res.status(500).json({ success: false, message: err instanceof Error ? err.message : String(err) });
     }
+  });
+
+  // ── Instagram-студія ───────────────────────────────────────────────────────
+  // Завантаження → товар → фонова підготовка всіх форматів. Відповідь віддаємо
+  // одразу: ffmpeg і AI разом займають хвилину-дві, тримати на них запит не можна.
+  app.post("/api/instagram/studio", ...requireUser, uploadCompat, async (req: Request, res: Response) => {
+    try {
+      const userId = currentUserId(req);
+      const uploaded = await normalizeUploadedPhotos(getUploadedFiles(req));
+      const files = uploaded.files;
+      const video = fileToVideo(getUploadedVideo(req));
+
+      if (uploaded.rejected.length && !files.length) {
+        return res.status(400).json({
+          success: false,
+          message:
+            `Не вдалося прочитати фото: ${uploaded.rejected.join(", ")}. ` +
+            "Якщо це фото з iPhone: Налаштування → Камера → Формати → «Найсумісніший», " +
+            "або збережи фото як JPEG.",
+        });
+      }
+
+      if (!files.length && !video.videoUrl) {
+        return res.status(400).json({ success: false, message: "Завантаж хоча б одне фото або відео товару" });
+      }
+
+      const images = filesToImages(files);
+      const product = productInputFromBody(req.body, images, video);
+      // Порожній список платформ — пости створює сама студія, по одному на формат.
+      const productId = await insertProduct(db, userId, product, images, []);
+
+      res.json({
+        success: true,
+        productId,
+        ...(await getProductDetails(db, productId)),
+        ...(uploaded.rejected.length ? { rejectedPhotos: uploaded.rejected } : {}),
+      });
+
+      prepareInstagramStudio(db, userId, productId).catch((error) =>
+        console.error(`[Studio] Фонова підготовка товару ${productId} впала:`, error)
+      );
+    } catch (error) {
+      console.error("Studio create error:", error);
+      const raw = error instanceof Error ? error.message : String(error);
+      return res.status(500).json({ success: false, message: raw || "Не вдалося створити товар" });
+    }
+  });
+
+  // Список товарів студії — сторінка малює з нього картки форматів.
+  app.get("/api/instagram/studio", ...requireUser, async (req: Request, res: Response) => {
+    try {
+      const products = await db.all(
+        `SELECT * FROM products WHERE userId = ? AND studioStatus IS NOT NULL ORDER BY id DESC LIMIT 50`,
+        [String(currentUserId(req))]
+      );
+      const hydrated = await Promise.all(
+        products.map(async (product: any) => ({
+          ...product,
+          images: await getImages(db, product.id),
+          platformPosts: await getPlatformPosts(db, product.id),
+        }))
+      );
+      return res.json({ success: true, products: hydrated });
+    } catch (error) {
+      console.error("Studio list error:", error);
+      return res.status(500).json({ success: false, message: "Не вдалося завантажити список" });
+    }
+  });
+
+  // Один товар — цим сторінка опитує готовність, поки медіа збирається.
+  app.get("/api/instagram/studio/:id", ...requireUser, async (req: Request, res: Response) => {
+    const details = await getOwnedProductDetails(db, Number(req.params.id), currentUserId(req));
+    if (!details) return res.status(404).json({ success: false, message: "Товар не знайдено" });
+    return res.json({ success: true, ...details });
+  });
+
+  // Перезібрати все: після правки назви/ціни або якщо підготовка впала.
+  app.post("/api/instagram/studio/:id/rebuild", ...requireUser, async (req: Request, res: Response) => {
+    const productId = Number(req.params.id);
+    const userId = currentUserId(req);
+    const details = await getOwnedProductDetails(db, productId, userId);
+    if (!details) return res.status(404).json({ success: false, message: "Товар не знайдено" });
+    if (details.product.studioStatus === "preparing") {
+      return res.status(409).json({ success: false, message: "Підготовка вже триває" });
+    }
+
+    await db.run(`UPDATE products SET studioStatus = 'preparing', studioError = NULL WHERE id = ?`, [productId]);
+    res.json({ success: true, ...(await getProductDetails(db, productId)) });
+
+    prepareInstagramStudio(db, userId, productId).catch((error) =>
+      console.error(`[Studio] Перезбірка товару ${productId} впала:`, error)
+    );
   });
 
   // Добірка: один Reels зі слайдшоу з фото кількох товарів («5 образів до 1000 грн»).
