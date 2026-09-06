@@ -2,6 +2,7 @@ import dotenv from "dotenv";
 import express, { Request, Response } from "express";
 import { NextFunction } from "express";
 import fs from "fs";
+import fsPromises from "fs/promises";
 import multer from "multer";
 import path from "path";
 
@@ -18,11 +19,14 @@ import { enabledPlatformIds, isPlatformId } from "./platforms";
 import { PlatformId, ProductInput } from "./platform-types";
 import { publishPlatformPost, startScheduler, syncTikTokPublishingPost } from "./scheduler";
 import {
+  convertHeifToJpeg,
   createInstagramImage,
   createReelsStyleVideo,
   createSlideshowReel,
   createStoryFrame,
   filePathToPublicUrl,
+  isHeifImage,
+  isReadableImage,
 } from "./video-overlay";
 import {
   buildAuthUrl,
@@ -244,6 +248,47 @@ function getUploadedVideo(req: Request) {
     | undefined;
 
   return groupedFiles?.video?.[0];
+}
+
+// Фото з iPhone за замовчуванням приходять у HEIC, який не приймає жодна з
+// наших платформ (а ffmpeg у цьому образі його навіть не читає). Ловимо це на
+// завантаженні — інакше товар створиться, а впаде вже публікація, можливо вночі
+// за розкладом. Перевіряємо сигнатуру файлу, бо mime-тип від клієнта часто
+// бреше і називає HEIC звичайним image/jpeg.
+async function normalizeUploadedPhotos(files: Express.Multer.File[]) {
+  const normalized: Express.Multer.File[] = [];
+  const rejected: string[] = [];
+
+  for (const file of files) {
+    if (!(await isHeifImage(file.path))) {
+      if (await isReadableImage(file.path)) {
+        normalized.push(file);
+      } else {
+        await fsPromises.rm(file.path, { force: true });
+        rejected.push(file.originalname || file.filename);
+        console.error(`[Upload] Файл ${file.originalname} не читається як зображення`);
+      }
+      continue;
+    }
+
+    try {
+      const converted = await convertHeifToJpeg(file.path, uploadsDir);
+      await fsPromises.rm(file.path, { force: true });
+      normalized.push({
+        ...file,
+        filename: converted.outputName,
+        path: converted.outputPath,
+        mimetype: "image/jpeg",
+      });
+      console.log(`[HEIC] ${file.originalname} сконвертовано у ${converted.outputName}`);
+    } catch (error) {
+      await fsPromises.rm(file.path, { force: true });
+      rejected.push(file.originalname || file.filename);
+      console.error(`[HEIC] Не вдалося сконвертувати ${file.originalname}:`, error);
+    }
+  }
+
+  return { files: normalized, rejected };
 }
 
 function filesToImages(files: Express.Multer.File[]) {
@@ -710,8 +755,19 @@ async function startServer() {
     uploadCompat,
     async (req: Request, res: Response) => {
       try {
-        const files = getUploadedFiles(req);
+        const uploaded = await normalizeUploadedPhotos(getUploadedFiles(req));
+        const files = uploaded.files;
         const video = fileToVideo(getUploadedVideo(req));
+
+        if (uploaded.rejected.length && !files.length) {
+          return res.status(400).json({
+            success: false,
+            message:
+              `Не вдалося прочитати фото: ${uploaded.rejected.join(", ")}. ` +
+              "Якщо це фото з iPhone: Налаштування → Камера → Формати → «Найсумісніший», " +
+              "або збережи фото як JPEG.",
+          });
+        }
 
         if (!files.length && !video.videoUrl) {
           return res.status(400).json({
@@ -728,7 +784,15 @@ async function startServer() {
         const details = await getProductDetails(db, productId);
 
         // Return response immediately — don't block on FFmpeg video processing
-        res.json({ success: true, ...details, productId, videoProcessing: !!product.videoPath });
+        res.json({
+          success: true,
+          ...details,
+          productId,
+          videoProcessing: !!product.videoPath,
+          // Частина фото могла не сконвертуватись — товар створено з решти,
+          // але продавець має про це знати одразу, а не побачити пропажу в пості.
+          ...(uploaded.rejected.length ? { rejectedPhotos: uploaded.rejected } : {}),
+        });
 
         prepareInstagramImagesInBackground(db, productId);
 
@@ -1149,7 +1213,7 @@ async function startServer() {
 
   app.post("/preview-post", ...requireUser, uploadCompat, async (req: Request, res: Response) => {
     try {
-      const files = getUploadedFiles(req);
+      const files = (await normalizeUploadedPhotos(getUploadedFiles(req))).files;
       const video = fileToVideo(getUploadedVideo(req));
 
       if (!files.length && !video.videoUrl) {

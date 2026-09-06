@@ -26,7 +26,7 @@ There is no test runner/framework configured. `scripts/` contains ad-hoc `tsx` d
 building the Shafa Playwright integration (e.g. `npm run test:shafa`, `npm run inspect:shafa`, and various
 `scripts/check-*.ts` one-offs) — these are manual diagnostic tools, not an automated suite.
 
-Production runs via the `Dockerfile` (Node 22 + ffmpeg + fonts-dejavu-core) on Railway.
+Production runs via the `Dockerfile` (Node 22 + ffmpeg + fonts-dejavu-core + libheif-examples) on Railway.
 
 ## Architecture
 
@@ -145,6 +145,13 @@ Derived media (`slideshow`/`story`) is built on demand via `POST /api/products/:
 on the product (`slideshowVideo*`, `storyImage*`) so a scheduled publish never waits on ffmpeg at slot time.
 Publishing waits on the container's real `status_code` (`waitForContainerReady`) instead of fixed sleeps —
 fixed pauses let longer videos publish before Meta finished processing them, which failed the post.
+
+HEIC/HEIF (what an iPhone shoots by default) is decoded at **upload** time by `normalizeUploadedPhotos`
+(server.ts) via `heif-convert` from `libheif-examples`, which the Dockerfile and nixpacks.toml install —
+the ffmpeg in this image cannot demux a HEIF container at all ("moov atom not found"), so without that
+package these photos work nowhere. Detection reads the file's own `ftyp` brand rather than the client's
+mime type, since browsers routinely upload HEIC labelled `image/jpeg`; a photo that cannot be decoded is
+rejected at upload with an explanation instead of failing at publish time, possibly overnight on a schedule.
 
 Instagram accepts **JPEG only**, with an aspect ratio between 4:5 and 1.91:1 and at most 8 MB, so PNG/WEBP
 uploads and ordinary 9:16 phone photos are rejected outright by the Graph API. `prepareInstagramImages`

@@ -1179,6 +1179,14 @@ async function createPreview() {
   activePlatform = platformPosts[0]?.platform || "telegram";
   renderPreview();
 
+  if (data.rejectedPhotos?.length) {
+    showMessage(
+      `Не вдалося прочитати ${data.rejectedPhotos.length} фото (${data.rejectedPhotos.join(", ")}) — решту завантажено. ` +
+      "Якщо це фото з iPhone: Налаштування → Камера → Формати → «Найсумісніший».",
+      "error"
+    );
+  }
+
   if (data.videoProcessing) {
     showMessage("Прев'ю готове · ⏳ Відео обробляється у фоні...");
     pollVideoProcessing(data.productId);

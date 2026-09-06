@@ -543,3 +543,76 @@ export async function createInstagramImage(input: InstagramImageInput) {
 
   return { outputPath, outputName, width, height };
 }
+
+// ── HEIC/HEIF (фото з iPhone) ────────────────────────────────────────────────
+// ffmpeg у нашому образі HEIF-контейнер не демуксить узагалі («moov atom not
+// found»), тому такі фото не пройдуть ні в Instagram, ні деінде. Декодуємо їх
+// через heif-convert (libheif-examples, стоїть у Dockerfile), а ffmpeg лишаємо
+// запасним варіантом на випадок новішого збирання, яке HEIF уже вміє.
+
+const HEIF_BRANDS = new Set([
+  "heic", "heix", "heim", "heis", "hevc", "hevm", "hevs", "mif1", "msf1", "avif", "avis",
+]);
+
+/**
+ * Визначає HEIC/HEIF/AVIF за сигнатурою файлу, а не за розширенням чи
+ * mime-типом від клієнта — браузери й застосунки регулярно позначають такі
+ * фото як image/jpeg.
+ */
+export async function isHeifImage(filePath: string) {
+  let handle;
+  try {
+    handle = await fs.open(filePath, "r");
+    const buffer = Buffer.alloc(12);
+    const { bytesRead } = await handle.read(buffer, 0, 12, 0);
+    if (bytesRead < 12) return false;
+    if (buffer.toString("latin1", 4, 8) !== "ftyp") return false;
+    return HEIF_BRANDS.has(buffer.toString("latin1", 8, 12).toLowerCase());
+  } catch {
+    return false;
+  } finally {
+    await handle?.close();
+  }
+}
+
+export async function convertHeifToJpeg(inputPath: string, uploadsDir: string) {
+  await fs.mkdir(uploadsDir, { recursive: true });
+
+  // Суфікс обов'язковий: HEIC часто приходить із розширенням .jpg (браузери
+  // й застосунки постійно так роблять), і без нього шлях виходу збігся б зі
+  // шляхом входу — конвертер писав би у файл, який сам читає, а виклик згори
+  // потім видалив би єдину копію фото.
+  const outputName = `${path.parse(inputPath).name}-heic.jpg`;
+  const outputPath = path.join(uploadsDir, outputName);
+
+  try {
+    await execFileAsync("heif-convert", ["-q", "92", inputPath, outputPath]);
+    return { outputPath, outputName };
+  } catch (heifError) {
+    console.error("heif-convert failed, trying ffmpeg:", heifError);
+    try {
+      await execFileAsync("ffmpeg", ["-y", "-i", inputPath, "-q:v", "2", outputPath]);
+      return { outputPath, outputName };
+    } catch (ffmpegError) {
+      await fs.rm(outputPath, { force: true });
+      throw new Error(
+        "Не вдалося прочитати фото у форматі HEIC. " +
+          "На iPhone: Налаштування → Камера → Формати → «Найсумісніший», або збережи фото як JPEG."
+      );
+    }
+  }
+}
+
+/**
+ * Фото, яке не читає ffprobe, не прочитає й жодна платформа. Ловимо це на
+ * завантаженні, щоб товар не створювався з непридатним фото, а продавець не
+ * дізнавався про проблему з провалу публікації.
+ */
+export async function isReadableImage(filePath: string) {
+  try {
+    const image = await probeImage(filePath);
+    return image.width > 0 && image.height > 0;
+  } catch {
+    return false;
+  }
+}

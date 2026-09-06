@@ -37,7 +37,7 @@ Instagram, TikTok, Shafa.ua, Prom.ua, OLX, Rozetka, Kasta.ua**. Деплой н�
 | `olx.ts` | OLX API v2 (OAuth, токени ротуються). `publishOlxPost`, `olxTestConnection` (повертає `accountId` для унікальності), рефреш. |
 | `rozetka.ts` | Rozetka Seller API (особистий токен). `publishRozetkaPost`, пошук категорій, best-effort підбір характеристик (`buildRozetkaParams`). |
 | `kasta.ts` | Kasta HUB API (особистий токен, заголовок `Authorization` БЕЗ «Bearer»). `publishKastaPost`, `kastaTestConnection`, `kastaSearchCategories` (kind_id+affiliation_id), завантаження фото, підбір характеристик. |
-| `video-overlay.ts` | ffmpeg: `createReelsStyleVideo` (оверлей тексту на відео), `createSlideshowReel` (фото → вертикальний Reels 1080×1920 із зумом і перетинами), `createStoryFrame` (кадр 9:16 із запеченою ціною для сторіз), `createInstagramImage` (фото → JPEG зі співвідношенням 4:5…1.91:1; повертає `null`, якщо оригінал уже підходить). Стилі: `minimal/fashion/premium/sale`. `-pix_fmt yuv420p` обов'язково; шрифт `fonts/Arial-Bold.ttf`. |
+| `video-overlay.ts` | ffmpeg: `createReelsStyleVideo` (оверлей тексту на відео), `createSlideshowReel` (фото → вертикальний Reels 1080×1920 із зумом і перетинами), `createStoryFrame` (кадр 9:16 із запеченою ціною для сторіз), `createInstagramImage` (фото → JPEG зі співвідношенням 4:5…1.91:1; повертає `null`, якщо оригінал уже підходить), `isHeifImage`/`convertHeifToJpeg` (HEIC з iPhone → JPEG через `heif-convert`), `isReadableImage`. Стилі: `minimal/fashion/premium/sale`. `-pix_fmt yuv420p` обов'язково; шрифт `fonts/Arial-Bold.ttf`. |
 | `shafa/index.ts` | Ре-експорти Shafa. |
 | `shafa/shafa.types.ts` | `ShafaProduct`, `SHAFA_COLORS`, `SHAFA_SIZES_*`, списки сезонів/рукавів тощо. |
 | `shafa/shafa.mapper.ts` | `mapProductToShafa(product, aiJson)` — AI JSON → `ShafaProduct`. Safety-net: дописує додатковий опис в description, якщо AI його не вплів. |
@@ -65,8 +65,8 @@ Instagram, TikTok, Shafa.ua, Prom.ua, OLX, Rozetka, Kasta.ua**. Деплой н�
 | `CLAUDE.md` | Правила/архітектура для Claude Code (авто-завантажується новою сесією). |
 | `PROJECT_MAP.md` | Цей файл — детальна мапа. |
 | `POSTING_SCHEDULE.md` | Графік публікацій в Instagram: слоти тижня, типи товарів, ліміти, ємність каталогу. |
-| `Dockerfile` | Node 22 + ffmpeg + fonts. Railway. |
-| `nixpacks.toml` | ffmpeg для Railway-білду. |
+| `Dockerfile` | Node 22 + ffmpeg + fonts + `libheif-examples` (heif-convert для HEIC). Railway. |
+| `nixpacks.toml` | ffmpeg + libheif-examples для Railway-білду. |
 | `tsconfig.json`, `package.json` | Конфіг TS / залежності й скрипти. |
 | `shafa-form-map.json` | Артефакт дослідження форми Shafa (довідково). |
 | `fonts/` | Шрифти для ffmpeg-оверлея. |
@@ -127,6 +127,7 @@ Instagram, TikTok, Shafa.ua, Prom.ua, OLX, Rozetka, Kasta.ua**. Деплой н�
 - **Instagram/TikTok** потребують публічний HTTPS `SITE_URL` для медіа.
 - **Формат поста в Instagram** зберігається в `platform_posts.platformSettings` (`{format}`) і обирається у вкладці Instagram. `auto` = історична поведінка (формат за набором медіа). Карусель із відео першим слайдом **не потрапляє в стрічку Reels** — для охоплення потрібен `reels` або `slideshow`.
 - **Слайдшоу і кадр сторіз готуються на вимогу** (`/api/products/:id/instagram-media`) і лежать на товарі, щоб публікація за розкладом не чекала на ffmpeg у момент слоту.
+- **HEIC (фото з iPhone) ffmpeg у нашому образі не читає взагалі** — конвертуємо на завантаженні через `heif-convert` (`normalizeUploadedPhotos` у `server.ts`). Формат визначається за сигнатурою файлу, а не за mime-типом: браузери регулярно віддають HEIC як `image/jpeg`. Нечитабельні фото відхиляються одразу з поясненням, а не ламають публікацію потім.
 - **Instagram приймає тільки JPEG зі співвідношенням 4:5…1.91:1** (і до 8 МБ). PNG/WEBP і звичайне вертикальне фото 9:16 Graph API відхиляє, тому копії готуються у фоні одразу після створення товару (`prepareInstagramImages`) і зберігаються в `product_images.igImage*`. Зайву висоту добиваємо розмитим фоном, не обрізаємо.
 - **Добірка — це звичайний товар** із заповненим `bundleOf`: так вона проходить тим самим шляхом товар → пост → планувальник. Фото добірки посилаються на файли вихідних товарів (не копіюються), але сам ролик — окремий самодостатній файл.
 - **Ціна+націнка:** база в `products.price` не змінюється; націнка (per-product `priceMarkup` + per-platform з `user_settings.platform_markups`, додаються) застосовується лише до тексту поста при генерації.
@@ -135,6 +136,7 @@ Instagram, TikTok, Shafa.ua, Prom.ua, OLX, Rozetka, Kasta.ua**. Деплой н�
 
 - **Instagram — усі чотири формати:** Reels, слайдшоу-Reels із фото, карусель, сторіз. Вибір формату на пості, підготовка похідного медіа через ffmpeg, опитування статусу контейнера замість фіксованих пауз.
 - **Фото під вимоги Instagram:** автоматична конвертація в JPEG і приведення співвідношення сторін до 4:5…1.91:1.
+- **HEIC з iPhone:** конвертація на завантаженні + зрозуміла відмова, якщо файл не читається.
 - **Добірка з кількох товарів:** один Reels зі слайдшоу з фото 2–6 товарів (`/api/products/bundle`, вибір на сторінці товарів).
 - **Графік публікацій** — `POSTING_SCHEDULE.md` (слоти тижня, типи товарів, безпечні ліміти).
 - **Kasta.ua** — дев'ята платформа.
