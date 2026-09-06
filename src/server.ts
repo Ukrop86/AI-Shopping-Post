@@ -18,6 +18,8 @@ import { PlatformId, ProductInput } from "./platform-types";
 import { publishPlatformPost, startScheduler, syncTikTokPublishingPost } from "./scheduler";
 import {
   createReelsStyleVideo,
+  createSlideshowReel,
+  createStoryFrame,
   filePathToPublicUrl,
 } from "./video-overlay";
 import {
@@ -330,6 +332,18 @@ function parseStoredObject(value: unknown): Record<string, unknown> {
   }
 }
 
+// Формат публікації в Instagram зберігається на самому пості (platformSettings),
+// бо з одного набору медіа виходять різні публікації: відео + фото — це або Reels,
+// або карусель із відео першим слайдом, і лише перше дає охоплення поза підписниками.
+const INSTAGRAM_FORMATS = ["auto", "reels", "slideshow", "carousel", "story"] as const;
+type InstagramPostFormat = (typeof INSTAGRAM_FORMATS)[number];
+
+function normalizeInstagramPostSettings(raw: unknown): { format: InstagramPostFormat } {
+  const source = parseStoredObject(raw);
+  const format = String(source.format || "auto") as InstagramPostFormat;
+  return { format: INSTAGRAM_FORMATS.includes(format) ? format : "auto" };
+}
+
 function presentPlatformPost(post: any) {
   if (!post) return post;
   return {
@@ -620,7 +634,12 @@ async function generateProcessedVideo(product: ProductInput) {
     return null;
   }
 
-  const videoTexts = await generateVideoTexts(product);
+  // Ціна, запечена в кадр, має збігатися з ціною в тексті поста. Це відео одне
+  // на всі платформи, тому застосовуємо лише націнку рівня товару — платформену
+  // не можна, вона в кожної платформи своя.
+  const videoTexts = await generateVideoTexts(
+    applyProductMarkup(product, Number(product.priceMarkup) || 0)
+  );
 
   const processedVideo = await createReelsStyleVideo({
     inputPath: product.videoPath,
@@ -805,6 +824,9 @@ async function startServer() {
         ? new Date(String(req.body.scheduledAt)).toISOString()
         : null;
       let platformSettings = post.platformSettings || null;
+      if (post.platform === "instagram" && req.body.platformSettings !== undefined) {
+        platformSettings = JSON.stringify(normalizeInstagramPostSettings(req.body.platformSettings));
+      }
       if (post.platform === "tiktok" && req.body.platformSettings !== undefined) {
         const settings = normalizeTikTokPostSettings(req.body.platformSettings);
         if (status === "scheduled") validateTikTokPostSettings(settings);
@@ -869,10 +891,13 @@ async function startServer() {
         return res.status(404).json({ success: false, message: "Пост платформи не знайдено" });
       }
 
-      if (req.body.text || (post.platform === "tiktok" && req.body.platformSettings !== undefined)) {
-        const platformSettings = post.platform === "tiktok" && req.body.platformSettings !== undefined
+      const settingsProvided = req.body.platformSettings !== undefined;
+      if (req.body.text || ((post.platform === "tiktok" || post.platform === "instagram") && settingsProvided)) {
+        const platformSettings = settingsProvided && post.platform === "tiktok"
           ? JSON.stringify(validateTikTokPostSettings(req.body.platformSettings))
-          : post.platformSettings;
+          : settingsProvided && post.platform === "instagram"
+            ? JSON.stringify(normalizeInstagramPostSettings(req.body.platformSettings))
+            : post.platformSettings;
         await db.run(
           `
           UPDATE platform_posts
@@ -1481,6 +1506,116 @@ async function startServer() {
       res.json({ success: true, ...result });
     } catch (err) {
       res.status(500).json({ success: false, message: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  // Готує похідне медіа для Instagram: слайдшоу-Reels із фото товару або кадр
+  // 9:16 для сторіз. Робиться на вимогу (а не при кожному завантаженні товару),
+  // і результат зберігається на товарі — щоб публікація за розкладом брала
+  // готовий файл, а не запускала ffmpeg у момент слоту.
+  app.post("/api/products/:id/instagram-media", ...requireUser, async (req: Request, res: Response) => {
+    try {
+      const productId = Number(req.params.id);
+      const userId = currentUserId(req);
+      const details = await getOwnedProductDetails(db, productId, userId);
+      if (!details) {
+        return res.status(404).json({ success: false, message: "Товар не знайдено" });
+      }
+
+      const format = toText(req.body.format);
+      if (format !== "slideshow" && format !== "story") {
+        return res.status(400).json({
+          success: false,
+          message: "Готувати медіа треба лише для форматів «слайдшоу» і «сторіз»",
+        });
+      }
+
+      const photoPaths = details.images
+        .map((image: any) => String(image.photoPath || ""))
+        .filter(Boolean);
+      if (!photoPaths.length) {
+        return res.status(400).json({ success: false, message: "Спочатку завантаж фото товару" });
+      }
+
+      const product = details.product;
+      const videoStyle = (product.videoStyle || "fashion") as any;
+      // Обидва артефакти — суто інстаграмні, тож ціна на них рахується з обома
+      // націнками: рівня товару і платформи.
+      const platformMarkups = await getPlatformMarkups(db, userId);
+      const markup = (Number(product.priceMarkup) || 0) + (platformMarkups.instagram || 0);
+      const productForTexts = applyProductMarkup(
+        {
+          title: product.title || "",
+          price: product.price || "",
+          dropPrice: product.dropPrice || "",
+          description: product.description || "",
+          imageUrls: details.images.map((image: any) => image.imageUrl),
+          photoPaths,
+        },
+        markup
+      );
+      const now = new Date().toISOString();
+
+      if (format === "slideshow") {
+        // Написи — той самий AI-генератор, що й для звичайних Reels. Якщо OpenAI
+        // недоступний, слайдшоу все одно збереться з дефолтними написами.
+        let videoTexts;
+        try {
+          videoTexts = await generateVideoTexts(productForTexts);
+        } catch (error) {
+          console.error("Slideshow texts failed, using defaults:", error);
+        }
+
+        const slideshow = await createSlideshowReel({
+          photoPaths,
+          uploadsDir,
+          videoTexts,
+          videoStyle,
+        });
+        const slideshowVideoUrl = filePathToPublicUrl(slideshow.outputPath);
+        await db.run(
+          `UPDATE products SET slideshowVideoPath = ?, slideshowVideoUrl = ?, updatedAt = ? WHERE id = ?`,
+          [slideshow.outputPath, slideshowVideoUrl, now, productId]
+        );
+
+        return res.json({
+          success: true,
+          slideshow: {
+            url: slideshowVideoUrl,
+            durationSec: slideshow.durationSec,
+            photosUsed: slideshow.photosUsed,
+          },
+          ...(await getProductDetails(db, productId)),
+        });
+      }
+
+      const priceLine = [productForTexts.title, productForTexts.price]
+        .map((part) => String(part || "").trim())
+        .filter(Boolean)
+        .join(" - ");
+      const story = await createStoryFrame({
+        inputPath: photoPaths[0],
+        uploadsDir,
+        overlayText: priceLine,
+        videoStyle,
+      });
+      const storyImageUrl = filePathToPublicUrl(story.outputPath);
+      await db.run(
+        `UPDATE products SET storyImagePath = ?, storyImageUrl = ?, updatedAt = ? WHERE id = ?`,
+        [story.outputPath, storyImageUrl, now, productId]
+      );
+
+      return res.json({
+        success: true,
+        story: { url: storyImageUrl },
+        ...(await getProductDetails(db, productId)),
+      });
+    } catch (error) {
+      console.error("Instagram media error:", error);
+      return res.status(500).json({
+        success: false,
+        message: error instanceof Error ? error.message : "Не вдалося підготувати медіа для Instagram",
+      });
     }
   });
 

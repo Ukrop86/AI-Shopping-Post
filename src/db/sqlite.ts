@@ -159,6 +159,13 @@ export async function initDb() {
   await ensureColumn(db, "products", "shopDescription", "TEXT");
   await ensureColumn(db, "products", "shopLanguage", "TEXT");
   await ensureColumn(db, "products", "priceMarkup", "REAL DEFAULT 0");
+  // Похідне медіа для Instagram, що готується на вимогу: слайдшоу-Reels із фото
+  // товару та кадр 9:16 для сторіз. Зберігаються на товарі, щоб запланована
+  // публікація брала готовий файл, а не запускала ffmpeg у момент слоту.
+  await ensureColumn(db, "products", "slideshowVideoPath", "TEXT");
+  await ensureColumn(db, "products", "slideshowVideoUrl", "TEXT");
+  await ensureColumn(db, "products", "storyImagePath", "TEXT");
+  await ensureColumn(db, "products", "storyImageUrl", "TEXT");
   await ensureColumn(db, "user_settings", "telegram_chat_id", "TEXT");
   // Telegram post extras: the contact username the "✍️ Написати" button links to,
   // and a JSON array of the seller's social/marketplace URLs shown in the post body

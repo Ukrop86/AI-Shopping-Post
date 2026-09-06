@@ -50,6 +50,10 @@ async function getProductInput(db: Db, productId: number): Promise<ProductInput>
     processedVideoUrl: product.processedVideoUrl || undefined,
     processedVideoPath: product.processedVideoPath || undefined,
     useProcessedVideo: product.useProcessedVideo === 1,
+    slideshowVideoUrl: product.slideshowVideoUrl || undefined,
+    slideshowVideoPath: product.slideshowVideoPath || undefined,
+    storyImageUrl: product.storyImageUrl || undefined,
+    storyImagePath: product.storyImagePath || undefined,
     generateVideo: product.generateVideo !== 0,
     shopName: product.shopName || undefined,
     shopDescription: product.shopDescription || undefined,
@@ -259,6 +263,7 @@ export async function publishPlatformPost(db: Db, postId: number, extras?: Recor
     // Shafa uses Playwright (~2 min) — retrying creates duplicate posts, so 1 attempt only
     const isShafa = post.platform === "shafa";
     const isTikTok = post.platform === "tiktok";
+    const isInstagram = post.platform === "instagram";
     // Retrying TikTok's init request can create duplicate posts if the first
     // request succeeded but its response was interrupted.
     const maxAttempts = isShafa || isTikTok ? 1 : 3;
@@ -277,6 +282,7 @@ export async function publishPlatformPost(db: Db, postId: number, extras?: Recor
             userTokens,
             numericUserId,
             ...(isTikTok ? { tiktokSettings: parseJsonObject(post.platformSettings) } : {}),
+            ...(isInstagram ? { instagramSettings: parseJsonObject(post.platformSettings) } : {}),
           },
         }),
       maxAttempts,

@@ -265,3 +265,171 @@ export function filePathToPublicUrl(filePath: string) {
 
   return `${baseUrl.replace(/\/$/, "")}/uploads/${fileName}`;
 }
+// ── Slideshow Reels (фото → вертикальне відео) ───────────────────────────────
+// Товари без відеозйомки інакше не потрапляють у Reels взагалі — а Reels це
+// єдиний формат, що дає охоплення поза підписниками. Тут з фото товару
+// збирається вертикальний ролик 1080×1920 з повільним зумом і перетинами,
+// поверх якого лягає той самий текстовий оверлей, що й на звичайних Reels.
+
+const REEL_WIDTH = 1080;
+const REEL_HEIGHT = 1920;
+const SLIDESHOW_FPS = 30;
+const SLIDESHOW_XFADE_SEC = 0.5;
+const MAX_SLIDESHOW_PHOTOS = 6;
+
+export type SlideshowReelInput = {
+  photoPaths: string[];
+  uploadsDir: string;
+  videoTexts?: VideoTextOverlay[];
+  videoStyle?: VideoStyle;
+  secondsPerPhoto?: number;
+};
+
+export async function createSlideshowReel(input: SlideshowReelInput) {
+  const photos = input.photoPaths
+    .filter((photoPath) => photoPath && fsSync.existsSync(photoPath))
+    .slice(0, MAX_SLIDESHOW_PHOTOS);
+
+  if (!photos.length) {
+    throw new Error("Для слайдшоу потрібне хоча б одне фото товару");
+  }
+
+  await fs.mkdir(input.uploadsDir, { recursive: true });
+
+  const secondsPerPhoto = Math.min(4, Math.max(2, input.secondsPerPhoto || 2.6));
+  const xfade = photos.length > 1 ? SLIDESHOW_XFADE_SEC : 0;
+  const totalDuration = photos.length * secondsPerPhoto - (photos.length - 1) * xfade;
+  const videoStyle: VideoStyle = input.videoStyle || "fashion";
+
+  const outputName = `slideshow-${Date.now()}.mp4`;
+  const outputPath = path.join(input.uploadsDir, outputName);
+
+  const args: string[] = ["-y"];
+  for (const photo of photos) {
+    args.push(
+      "-framerate", String(SLIDESHOW_FPS),
+      "-loop", "1",
+      "-t", String(secondsPerPhoto),
+      "-i", photo
+    );
+  }
+  // Мовчазна аудіодоріжка: відео зовсім без аудіопотоку частина клієнтів
+  // (у т.ч. завантаження в Reels) обробляє непередбачувано.
+  args.push(
+    "-f", "lavfi",
+    "-t", String(totalDuration),
+    "-i", "anullsrc=channel_layout=stereo:sample_rate=44100"
+  );
+
+  const chains: string[] = [];
+  photos.forEach((_, index) => {
+    chains.push(
+      `[${index}:v]scale=${REEL_WIDTH}:${REEL_HEIGHT}:force_original_aspect_ratio=increase,` +
+        `crop=${REEL_WIDTH}:${REEL_HEIGHT},setsar=1,fps=${SLIDESHOW_FPS},` +
+        // d=1 — zoompan накопичує zoom по кадрах вхідного зображення, тож
+        // тривалість кадру задає -t на вході, а не параметр d.
+        `zoompan=z='min(zoom+0.0008,1.10)':d=1:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':` +
+        `s=${REEL_WIDTH}x${REEL_HEIGHT}:fps=${SLIDESHOW_FPS},format=yuv420p[v${index}]`
+    );
+  });
+
+  let lastLabel = "v0";
+  for (let index = 1; index < photos.length; index++) {
+    const offset = (secondsPerPhoto - xfade) * index;
+    const label = `x${index}`;
+    chains.push(
+      `[${lastLabel}][v${index}]xfade=transition=fade:duration=${xfade}:` +
+        `offset=${offset.toFixed(2)}[${label}]`
+    );
+    lastLabel = label;
+  }
+
+  const texts = normalizeVideoTexts(input.videoTexts)
+    .filter((item) => item.start < totalDuration)
+    .map((item) => ({ ...item, end: Math.min(item.end, totalDuration) }));
+  const drawFilters = texts.map((item) =>
+    buildDrawTextFilter(item, REEL_WIDTH, videoStyle)
+  );
+  if (drawFilters.length) {
+    chains.push(`[${lastLabel}]${drawFilters.join(",")}[out]`);
+    lastLabel = "out";
+  }
+
+  args.push(
+    "-filter_complex", chains.join(";"),
+    "-map", `[${lastLabel}]`,
+    "-map", `${photos.length}:a`,
+    "-c:v", "libx264",
+    "-preset", "veryfast",
+    "-crf", "23",
+    // Обов'язково для Instagram/TikTok — без цього відео можуть відхилити
+    "-pix_fmt", "yuv420p",
+    "-r", String(SLIDESHOW_FPS),
+    "-c:a", "aac",
+    "-b:a", "128k",
+    "-shortest",
+    "-movflags", "+faststart",
+    outputPath
+  );
+
+  await execFileAsync("ffmpeg", args, { maxBuffer: 10 * 1024 * 1024 });
+
+  return {
+    outputPath,
+    outputName,
+    videoStyle,
+    photosUsed: photos.length,
+    durationSec: Number(totalDuration.toFixed(2)),
+  };
+}
+
+// ── Кадр для Stories ─────────────────────────────────────────────────────────
+// У сторіз немає підпису, тому все, що має прочитати покупець (назва, ціна),
+// треба запікати в саме зображення. Заразом приводимо фото будь-яких пропорцій
+// до 9:16, щоб Instagram не додавав власні поля.
+
+export type StoryFrameInput = {
+  inputPath: string;
+  uploadsDir: string;
+  overlayText?: string;
+  videoStyle?: VideoStyle;
+};
+
+export async function createStoryFrame(input: StoryFrameInput) {
+  if (!fsSync.existsSync(input.inputPath)) {
+    throw new Error("Фото для сторіз не знайдено");
+  }
+
+  await fs.mkdir(input.uploadsDir, { recursive: true });
+
+  const videoStyle: VideoStyle = input.videoStyle || "fashion";
+  const outputName = `story-${Date.now()}.jpg`;
+  const outputPath = path.join(input.uploadsDir, outputName);
+
+  const overlay = input.overlayText?.trim()
+    ? buildDrawTextFilter(
+        { text: input.overlayText.trim(), start: 0, end: 1, position: "bottom" },
+        REEL_WIDTH,
+        videoStyle
+      )
+    : "";
+
+  const chains = [
+    `[0:v]scale=${REEL_WIDTH}:${REEL_HEIGHT}:force_original_aspect_ratio=increase,` +
+      `crop=${REEL_WIDTH}:${REEL_HEIGHT},boxblur=20:3,eq=brightness=-0.06[bg]`,
+    `[0:v]scale=${REEL_WIDTH}:${REEL_HEIGHT}:force_original_aspect_ratio=decrease[fg]`,
+    `[bg][fg]overlay=(W-w)/2:(H-h)/2,setsar=1${overlay ? `,${overlay}` : ""}[out]`,
+  ];
+
+  await execFileAsync("ffmpeg", [
+    "-y",
+    "-i", input.inputPath,
+    "-filter_complex", chains.join(";"),
+    "-map", "[out]",
+    "-frames:v", "1",
+    "-q:v", "3",
+    outputPath,
+  ]);
+
+  return { outputPath, outputName };
+}

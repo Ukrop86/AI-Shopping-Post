@@ -128,10 +128,24 @@ platforms (Shafa, Prom, OLX, Rozetka, Kasta) require the model to return structu
 of the generated text before publish) rather than plain post copy.
 
 ### Video overlay (`src/video-overlay.ts`)
-ffmpeg/ffprobe-based Reels-style text overlay. Styles: `minimal`, `fashion` (default), `premium`, `sale`.
-Requires `-pix_fmt yuv420p` (Instagram rejects video without it) and avoids emoji in `drawtext` (ffmpeg can't
-render them without an emoji font) — uses `fonts/Arial-Bold.ttf` bundled in the repo, with a `HAS_FONT`
-existence check and graceful fallback if it's ever missing.
+ffmpeg/ffprobe-based media prep. Three builders: `createReelsStyleVideo` (text overlay on an uploaded video),
+`createSlideshowReel` (product photos → a 1080×1920 Reel with a slow zoom and crossfades, so photo-only
+products can reach Reels at all) and `createStoryFrame` (a 9:16 frame with the price burned in — stories carry
+no caption, so anything the buyer must read has to be part of the image). Styles: `minimal`, `fashion`
+(default), `premium`, `sale`. Requires `-pix_fmt yuv420p` (Instagram rejects video without it) and avoids emoji
+in `drawtext` (ffmpeg can't render them without an emoji font) — uses `fonts/Arial-Bold.ttf` bundled in the
+repo, with a `HAS_FONT` existence check and graceful fallback if it's ever missing.
+
+### Instagram formats (`src/instagram.ts`)
+One media set yields different posts, so the format is the seller's choice, stored per post in
+`platform_posts.platformSettings` (`{format}`) and picked in the Instagram tab: `auto` (legacy behaviour —
+format derived from the uploaded media), `reels`, `slideshow`, `carousel`, `story`. A carousel with a video
+first slide never reaches the Reels feed, which is why `auto` is not a safe default for reach.
+Derived media (`slideshow`/`story`) is built on demand via `POST /api/products/:id/instagram-media` and stored
+on the product (`slideshowVideo*`, `storyImage*`) so a scheduled publish never waits on ffmpeg at slot time.
+Publishing waits on the container's real `status_code` (`waitForContainerReady`) instead of fixed sleeps —
+fixed pauses let longer videos publish before Meta finished processing them, which failed the post.
+The weekly posting plan these formats serve lives in `POSTING_SCHEDULE.md`.
 
 ## Environment variables
 

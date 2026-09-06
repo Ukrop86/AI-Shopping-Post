@@ -39,6 +39,14 @@ export type ProductInput = {
   processedVideoPath?: string;
   useProcessedVideo?: boolean;
   generateVideo?: boolean;
+  // Reels, зібраний із фото товару (для позицій без відеозйомки), і кадр 9:16
+  // із запеченою ціною для сторіз. Готуються на вимогу через
+  // POST /api/products/:id/instagram-media і зберігаються на товарі, щоб
+  // заплановані публікації не чекали на ffmpeg у момент слоту.
+  slideshowVideoUrl?: string;
+  slideshowVideoPath?: string;
+  storyImageUrl?: string;
+  storyImagePath?: string;
   shopName?: string;
   shopDescription?: string;
   shopLanguage?: string;

@@ -1,4 +1,4 @@
-import { publishInstagramPost } from "../instagram";
+import { InstagramFormat, publishInstagramPost } from "../instagram";
 import { sendTelegramPost } from "../telegram";
 import { publishFacebookPost } from "../facebook";
 import { publishToShafa, mapProductToShafa, ShafaSessionExpiredError, shafaSessionPathForUser, shafaDebugPrefixForUser } from "../shafa";
@@ -145,12 +145,23 @@ ${commonRules(product)}
 Поверни тільки готовий текст поста.
 `.trim();
   },
-  async publish({ text, imageUrls, videoUrl, extras }) {
-    if (!videoUrl && !imageUrls[0]) {
+  async publish({ product, text, imageUrls, videoUrl, extras }) {
+    // Формат обирає продавець (зберігається на самому пості), бо з одного набору
+    // медіа виходять різні публікації: відео + фото — це або Reels, або карусель
+    // із відео першим слайдом, і лише перше дає охоплення поза підписниками.
+    const settings = (extras?.instagramSettings as Record<string, unknown>) || {};
+    const format = (settings.format as InstagramFormat) || "auto";
+
+    if (!videoUrl && !imageUrls[0] && !product.slideshowVideoUrl) {
       throw new Error("Instagram потребує фото або відео товару для публікації");
     }
+
     const creds = (extras?.userTokens as any)?.instagram;
-    const result = await publishInstagramPost(imageUrls[0], text, videoUrl, imageUrls, creds);
+    const result = await publishInstagramPost(imageUrls[0], text, videoUrl, imageUrls, creds, {
+      format,
+      slideshowVideoUrl: product.slideshowVideoUrl,
+      storyImageUrl: product.storyImageUrl,
+    });
     return { externalPostId: result.id, raw: result };
   },
 };

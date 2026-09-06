@@ -817,6 +817,56 @@ textarea {
 
 .schedule-row { max-width: 260px; }
 
+/* ── Instagram publishing format ─────────────────────── */
+.instagram-settings-card {
+  display: grid;
+  gap: 12px;
+  margin: 16px 0;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+  background: rgba(0, 0, 0, 0.16);
+}
+
+.instagram-settings-card label { display: grid; gap: 6px; }
+
+.instagram-note {
+  color: var(--text2);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.instagram-note.warn { color: var(--orange); }
+
+.instagram-media-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.instagram-media-row > div { min-width: 0; }
+
+.instagram-media-row small {
+  display: block;
+  margin-top: 3px;
+  color: var(--text2);
+  font-size: 12px;
+}
+
+.instagram-media-preview {
+  width: 100%;
+  max-width: 200px;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--border);
+}
+
+@media (max-width: 620px) {
+  .instagram-media-row { grid-template-columns: minmax(0, 1fr); }
+}
+
 /* ── TikTok Direct Post review controls ──────────────── */
 .tiktok-settings-card {
   display: grid;

@@ -544,6 +544,144 @@ function getTikTokSettings(post) {
   return settings;
 }
 
+// Формат публікації в Instagram. З одного набору медіа виходять різні пости,
+// і вибір не косметичний: карусель із відео першим слайдом не потрапляє в стрічку
+// Reels, тобто не дає охоплення поза підписниками.
+const INSTAGRAM_FORMATS = [
+  { value: "auto",      label: "Авто",              hint: "Формат за набором медіа: є відео — Reels, кілька фото — карусель." },
+  { value: "reels",     label: "Reels (відео)",     hint: "Вертикальне відео товару. Головний формат для охоплення." },
+  { value: "slideshow", label: "Слайдшоу з фото",   hint: "Reels, зібраний із фото товару — для позицій без відеозйомки." },
+  { value: "carousel",  label: "Карусель",          hint: "Фото в стрічку. Оптимально 4–6, більше догортує менше людей." },
+  { value: "story",     label: "Сторіз",            hint: "Кадр 9:16 із запеченою ціною. Живе 24 години, підпису немає." },
+];
+
+let instagramMediaState = { productId: null, format: "", busy: false, error: "" };
+
+function getInstagramSettings(post) {
+  const raw = post?.platformSettings && typeof post.platformSettings === "object"
+    ? post.platformSettings
+    : {};
+  const known = INSTAGRAM_FORMATS.some(item => item.value === raw.format);
+  const settings = { format: known ? raw.format : "auto" };
+  if (post) post.platformSettings = settings;
+  return settings;
+}
+
+function syncInstagramSettingsFromForm(post) {
+  if (!post || post.platform !== "instagram") return getInstagramSettings(post);
+  const format = platformEditor.querySelector("#instagramFormat")?.value || "auto";
+  const settings = { format: INSTAGRAM_FORMATS.some(item => item.value === format) ? format : "auto" };
+  post.platformSettings = settings;
+  return settings;
+}
+
+function getInstagramPublishBlockReason(post) {
+  if (!post || post.platform !== "instagram") return "";
+  const { format } = getInstagramSettings(post);
+  const hasVideo = !!(currentProduct?.videoUrl || currentProduct?.processedVideoUrl);
+  const hasPhotos = (currentImages?.length || 0) > 0;
+
+  if (format === "reels" && !hasVideo) return "Для Reels завантаж відео або обери «Слайдшоу з фото»";
+  if (format === "slideshow" && !currentProduct?.slideshowVideoUrl) return "Спочатку збери слайдшоу з фото";
+  if (format === "carousel" && !hasPhotos) return "Для каруселі завантаж фото товару";
+  if (format === "story" && !currentProduct?.storyImageUrl && !hasPhotos && !hasVideo) {
+    return "Для сторіз завантаж фото або відео товару";
+  }
+  if (format === "auto" && !hasPhotos && !hasVideo) return "Завантаж фото або відео товару";
+  return "";
+}
+
+function renderInstagramExtras(post) {
+  const { format } = getInstagramSettings(post);
+  const hasVideo = !!(currentProduct?.videoUrl || currentProduct?.processedVideoUrl);
+  const hasPhotos = (currentImages?.length || 0) > 0;
+  const active = INSTAGRAM_FORMATS.find(item => item.value === format) || INSTAGRAM_FORMATS[0];
+  const stateMatches = instagramMediaState.productId === currentProduct?.id;
+  const busy = stateMatches && instagramMediaState.busy;
+  const error = stateMatches ? instagramMediaState.error : "";
+
+  const options = INSTAGRAM_FORMATS
+    .map(item => `<option value="${item.value}" ${item.value === format ? "selected" : ""}>${escapeHtml(item.label)}</option>`)
+    .join("");
+
+  let mediaBlock = "";
+  if (format === "slideshow") {
+    const ready = !!currentProduct?.slideshowVideoUrl;
+    mediaBlock = `
+      <div class="instagram-media-row">
+        <div>
+          <strong>${ready ? "Слайдшоу готове" : "Слайдшоу ще не зібране"}</strong>
+          <small>${hasPhotos
+            ? `Збираємо вертикальний ролик 1080×1920 з фото товару (до 6 кадрів).`
+            : `Спочатку завантаж фото товару.`}</small>
+        </div>
+        <button type="button" class="btn secondary prepare-instagram-media" data-format="slideshow" ${busy || !hasPhotos ? "disabled" : ""}>
+          ${busy ? "Збираємо…" : ready ? "Перезібрати" : "Зібрати слайдшоу"}
+        </button>
+      </div>
+      ${ready ? `<video class="instagram-media-preview" src="${escapeHtml(currentProduct.slideshowVideoUrl)}" controls playsinline></video>` : ""}
+    `;
+  } else if (format === "story") {
+    const ready = !!currentProduct?.storyImageUrl;
+    mediaBlock = `
+      <div class="instagram-media-row">
+        <div>
+          <strong>${ready ? "Кадр для сторіз готовий" : "Кадр для сторіз не готовий"}</strong>
+          <small>У сторіз немає підпису — назву й ціну запікаємо в саме зображення 9:16.</small>
+        </div>
+        <button type="button" class="btn secondary prepare-instagram-media" data-format="story" ${busy || !hasPhotos ? "disabled" : ""}>
+          ${busy ? "Готуємо…" : ready ? "Оновити кадр" : "Підготувати кадр"}
+        </button>
+      </div>
+      ${ready ? `<img class="instagram-media-preview" src="${escapeHtml(currentProduct.storyImageUrl)}" alt="Кадр для сторіз">` : ""}
+      <small class="instagram-note">Опитування, посилання й інші наліпки через API недоступні — їх можна додати вручну вже до опублікованої сторіз.</small>
+    `;
+  } else if (format === "auto" && hasVideo && hasPhotos) {
+    mediaBlock = `
+      <small class="instagram-note warn">Є і відео, і фото: вийде карусель із відео першим слайдом. Вона не потрапляє в стрічку Reels — для охоплення обери «Reels (відео)».</small>
+    `;
+  }
+
+  return `
+    <section class="instagram-settings-card">
+      <label>
+        Формат публікації
+        <select id="instagramFormat">${options}</select>
+      </label>
+      <small class="instagram-note">${escapeHtml(active.hint)}</small>
+      ${mediaBlock}
+      ${error ? `<small class="instagram-note error-text">${escapeHtml(error)}</small>` : ""}
+    </section>
+  `;
+}
+
+async function prepareInstagramMedia(format) {
+  if (!currentProduct?.id) throw new Error("Спочатку згенеруй прев'ю товару");
+
+  instagramMediaState = { productId: currentProduct.id, format, busy: true, error: "" };
+  renderPlatformEditor();
+  setLoading(true, format === "slideshow" ? "Збираємо слайдшоу з фото…" : "Готуємо кадр для сторіз…");
+
+  try {
+    const response = await fetch(`/api/products/${currentProduct.id}/instagram-media`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authHeaders() },
+      body: JSON.stringify({ format }),
+    });
+    const data = await response.json();
+    if (!response.ok || !data.success) throw new Error(data.message || "Не вдалося підготувати медіа");
+
+    if (data.product) currentProduct = data.product;
+    instagramMediaState = { productId: currentProduct.id, format, busy: false, error: "" };
+    showMessage(format === "slideshow" ? "Слайдшоу зібрано ✓" : "Кадр для сторіз готовий ✓");
+  } catch (error) {
+    instagramMediaState = { productId: currentProduct.id, format, busy: false, error: error.message };
+    throw error;
+  } finally {
+    renderPlatformEditor();
+  }
+}
+
 function syncTikTokSettingsFromForm(post) {
   if (!post || post.platform !== "tiktok") return getTikTokSettings(post);
   const privacyLevel = platformEditor.querySelector("#tiktokPrivacy")?.value || "";
@@ -916,7 +1054,8 @@ function renderPlatformEditor() {
   const post = currentPost();
   if (!post) { platformEditor.innerHTML = ""; return; }
   const tiktokBlockReason = getTikTokPublishBlockReason(post);
-  const publishBlocked = post.status === "publishing" || !!tiktokBlockReason;
+  const blockReason = tiktokBlockReason || getInstagramPublishBlockReason(post);
+  const publishBlocked = post.status === "publishing" || !!blockReason;
   const statusLabels = { draft: "Чернетка", scheduled: "Заплановано", publishing: "Обробляється", published: "Опубліковано", failed: "Помилка" };
 
   productIdBadge.textContent = currentProduct ? `#${currentProduct.id}` : "";
@@ -943,6 +1082,7 @@ function renderPlatformEditor() {
 
     ${post.platform === "shafa" ? renderShafaExtras() : ""}
     ${post.platform === "tiktok" ? renderTikTokExtras(post) : ""}
+    ${post.platform === "instagram" ? renderInstagramExtras(post) : ""}
 
     <div class="schedule-row">
       <label>
@@ -953,8 +1093,8 @@ function renderPlatformEditor() {
 
     <div class="actions">
       <button type="button" class="btn secondary regenerate-platform">Перегенерувати</button>
-      <button type="button" class="btn success publish-platform" ${publishBlocked ? "disabled" : ""} ${tiktokBlockReason ? `title="${escapeHtml(tiktokBlockReason)}"` : ""}>${post.status === "publishing" ? "Обробляється в TikTok…" : "Опублікувати зараз"}</button>
-      <button type="button" class="btn primary schedule-platform" ${post.platform === "tiktok" && tiktokBlockReason ? `disabled title="${escapeHtml(tiktokBlockReason)}"` : ""}>Запланувати</button>
+      <button type="button" class="btn success publish-platform" ${publishBlocked ? "disabled" : ""} ${blockReason ? `title="${escapeHtml(blockReason)}"` : ""}>${post.status === "publishing" ? "Обробляється в TikTok…" : "Опублікувати зараз"}</button>
+      <button type="button" class="btn primary schedule-platform" ${blockReason ? `disabled title="${escapeHtml(blockReason)}"` : ""}>Запланувати</button>
     </div>
   `;
 
@@ -978,6 +1118,7 @@ async function savePost(post, status, scheduledAt = null) {
       status,
       scheduledAt,
       ...(post.platform === "tiktok" ? { platformSettings: getTikTokSettings(post) } : {}),
+      ...(post.platform === "instagram" ? { platformSettings: getInstagramSettings(post) } : {}),
     }),
   });
   const data = await response.json();
@@ -1008,6 +1149,7 @@ async function createPreview() {
   currentImages  = data.images || [];
   platformPosts  = data.platformPosts || [];
   tiktokCreatorState = { postId: null, info: null, videoDurationSec: null, loading: false, error: "" };
+  instagramMediaState = { productId: null, format: "", busy: false, error: "" };
   activePlatform = platformPosts[0]?.platform || "telegram";
   renderPreview();
 
@@ -1098,6 +1240,7 @@ async function publishPost(post) {
         text: post.text,
         ...(isShafa ? { extras: shafaExtras } : {}),
         ...(isTikTok ? { platformSettings: getTikTokSettings(post) } : {}),
+        ...(post.platform === "instagram" ? { platformSettings: getInstagramSettings(post) } : {}),
       }),
       signal: controller.signal,
     });
@@ -1258,6 +1401,8 @@ platformEditor.addEventListener("click", async e => {
   if (!post) return;
   try {
     if (e.target.closest(".refresh-tiktok-info")) await loadTikTokCreatorInfo(post, true);
+    const prepareButton = e.target.closest(".prepare-instagram-media");
+    if (prepareButton) await prepareInstagramMedia(prepareButton.dataset.format);
     if (e.target.closest(".regenerate-platform"))  await regeneratePlatform(post.platform);
     if (e.target.closest(".publish-platform"))     await publishPost(post);
     if (e.target.closest(".schedule-platform"))    await schedulePost(post);
@@ -1288,6 +1433,12 @@ platformEditor.addEventListener("change", async e => {
   const post = currentPost();
   if (post?.platform === "tiktok" && e.target.closest(".tiktok-settings-card")) {
     syncTikTokSettingsFromForm(post);
+    renderPlatformEditor();
+  }
+
+  if (post?.platform === "instagram" && e.target.closest("#instagramFormat")) {
+    syncCurrentTextarea();
+    syncInstagramSettingsFromForm(post);
     renderPlatformEditor();
   }
 });

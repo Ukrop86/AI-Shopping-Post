@@ -31,13 +31,13 @@ Instagram, TikTok, Shafa.ua, Prom.ua, OLX, Rozetka, Kasta.ua**. Деплой н�
 | `telegram.ts` | Telegram Bot API: `sendTelegramPost` (фото/відео/альбом/текст), `sendTelegramMediaGroup`, `sendTelegramMixedMediaGroup`, `editTelegramPost`. Кнопка «✍️ Написати» (per-user логін), `injectSocialLinks` (соцпосилання перед хештегами). Альбом → кнопка окремим повідомленням (обмеження Telegram). |
 | `facebook.ts` | Публікація на Facebook-сторінку (фото/відео/альбом), Graph API v25. |
 | `facebook-auth.ts` | Facebook OAuth (code grant): `buildAuthUrl`, `completeFacebookOAuth`, `selectFacebookPage(Manual)`, `getFacebookStatus`, `readEnv`/`writeEnvVars` (читає/пише `/data/.env` для глобального/адмін-конфігу). |
-| `instagram.ts` | Публікація в Instagram через Graph API (Reels, карусель, фото). Потребує публічний HTTPS `SITE_URL`. |
+| `instagram.ts` | Публікація в Instagram через Graph API. Формати: `auto/reels/slideshow/carousel/story` (`InstagramFormat`), `publishInstagramStory`, опитування статусу контейнера (`waitForContainerReady`) замість фіксованих пауз. Потребує публічний HTTPS `SITE_URL`. |
 | `tiktok.ts` | TikTok Content Posting API: OAuth (`getTikTokAuthUrl`, `exchangeTikTokCode`, `refreshTikTokTokenRaw`), `publishTikTokVideo`, `publishTikTokPhotos`, `getTikTokStatus`. Токени глобальні (у `/data/.env`). |
 | `prom.ts` | Prom.ua Marketplace API (особистий токен продавця). `publishPromPost`, тест з'єднання, пошук категорій. |
 | `olx.ts` | OLX API v2 (OAuth, токени ротуються). `publishOlxPost`, `olxTestConnection` (повертає `accountId` для унікальності), рефреш. |
 | `rozetka.ts` | Rozetka Seller API (особистий токен). `publishRozetkaPost`, пошук категорій, best-effort підбір характеристик (`buildRozetkaParams`). |
 | `kasta.ts` | Kasta HUB API (особистий токен, заголовок `Authorization` БЕЗ «Bearer»). `publishKastaPost`, `kastaTestConnection`, `kastaSearchCategories` (kind_id+affiliation_id), завантаження фото, підбір характеристик. |
-| `video-overlay.ts` | ffmpeg-оверлей тексту (Reels). Стилі: `minimal/fashion/premium/sale`. `-pix_fmt yuv420p` обов'язково; шрифт `fonts/Arial-Bold.ttf`. |
+| `video-overlay.ts` | ffmpeg: `createReelsStyleVideo` (оверлей тексту на відео), `createSlideshowReel` (фото → вертикальний Reels 1080×1920 із зумом і перетинами), `createStoryFrame` (кадр 9:16 із запеченою ціною для сторіз). Стилі: `minimal/fashion/premium/sale`. `-pix_fmt yuv420p` обов'язково; шрифт `fonts/Arial-Bold.ttf`. |
 | `shafa/index.ts` | Ре-експорти Shafa. |
 | `shafa/shafa.types.ts` | `ShafaProduct`, `SHAFA_COLORS`, `SHAFA_SIZES_*`, списки сезонів/рукавів тощо. |
 | `shafa/shafa.mapper.ts` | `mapProductToShafa(product, aiJson)` — AI JSON → `ShafaProduct`. Safety-net: дописує додатковий опис в description, якщо AI його не вплів. |
@@ -64,6 +64,7 @@ Instagram, TikTok, Shafa.ua, Prom.ua, OLX, Rozetka, Kasta.ua**. Деплой н�
 |------|----|
 | `CLAUDE.md` | Правила/архітектура для Claude Code (авто-завантажується новою сесією). |
 | `PROJECT_MAP.md` | Цей файл — детальна мапа. |
+| `POSTING_SCHEDULE.md` | Графік публікацій в Instagram: слоти тижня, типи товарів, ліміти, ємність каталогу. |
 | `Dockerfile` | Node 22 + ffmpeg + fonts. Railway. |
 | `nixpacks.toml` | ffmpeg для Railway-білду. |
 | `tsconfig.json`, `package.json` | Конфіг TS / залежності й скрипти. |
@@ -78,7 +79,7 @@ Instagram, TikTok, Shafa.ua, Prom.ua, OLX, Rozetka, Kasta.ua**. Деплой н�
 | `users` | `id, email (UNIQUE), password_hash, created_at`. |
 | `user_social_tokens` | Пер-юзерні креди платформ (1 рядок на user+platform). Токени шифровані. Поля: `platform, access_token, refresh_token, page_id, page_name, open_id, instagram_user_id, expires_at, login, meta (JSON), external_account_id`. Унікальність «1 зовнішній акаунт = 1 юзер» через partial unique indexes (`page_id`, `instagram_user_id`, `open_id`, `external_account_id`). |
 | `user_settings` | 1 рядок на юзера. `shop_name/description/language`, `facebook_page_url`, `instagram_url`, `telegram_chat_id`, **`telegram_order_login`** (логін для кнопки), **`telegram_social_links`** (JSON-масив), **`platform_markups`** (JSON `{платформа: %}`). Унікальний індекс на `telegram_chat_id`. |
-| `products` | Товар. `title, price, dropPrice, sizes, sizeSystem, colors, fabric, description, model, imageUrl, photoPath, video*`, `videoStyle`, `shopName/Description/Language`, **`priceMarkup`** (REAL, ±%), `userId`, `generatedPost` (telegram-чернетка). |
+| `products` | Товар. `title, price, dropPrice, sizes, sizeSystem, colors, fabric, description, model, imageUrl, photoPath, video*`, `videoStyle`, `shopName/Description/Language`, **`priceMarkup`** (REAL, ±%), **`slideshowVideoPath/Url`** (Reels із фото), **`storyImagePath/Url`** (кадр для сторіз), `userId`, `generatedPost` (telegram-чернетка). |
 | `product_images` | Фото товару (багато-до-одного): `productId, imageUrl, photoPath, sortOrder`. |
 | `platform_posts` | Пост на платформу (1 рядок на product×platform). `platform, text, status (draft/scheduled/publishing/published/failed), scheduledAt, publishedAt, externalPostId, externalChatId, errorMessage, platformSettings (JSON), platformStatus (JSON)`. |
 
@@ -90,7 +91,7 @@ Instagram, TikTok, Shafa.ua, Prom.ua, OLX, Rozetka, Kasta.ua**. Деплой н�
 
 | Група | Роути |
 |-------|-------|
-| Товари/прев'ю | `POST /api/posts/preview`, `POST /api/posts/:productId/regenerate`, `GET/PUT /api/products/:id`, `GET /api/products`, `PUT /api/products/:id/video-choice`, `POST /api/products/:id/publish`, legacy `/preview-post`, `/publish-preview`, `/products-api`. |
+| Товари/прев'ю | `POST /api/posts/preview`, `POST /api/posts/:productId/regenerate`, `GET/PUT /api/products/:id`, `GET /api/products`, `PUT /api/products/:id/video-choice`, **`POST /api/products/:id/instagram-media`** (збирає слайдшоу-Reels або кадр сторіз), `POST /api/products/:id/publish`, legacy `/preview-post`, `/publish-preview`, `/products-api`. |
 | Пости | `PUT /api/platform-posts/:id`, `POST /api/platform-posts/:id/publish`, `GET /api/platform-posts/:id/status`. |
 | Акаунт/статус | `GET /api/user/social-status`, `DELETE /api/user/social/:platform`, `DELETE /api/account`, `GET /api/stats/summary`. |
 | Налаштування | `GET/POST /api/settings/shop`, `GET /api/settings/markups`, `POST /api/settings/markup`. |
@@ -124,10 +125,14 @@ Instagram, TikTok, Shafa.ua, Prom.ua, OLX, Rozetka, Kasta.ua**. Деплой н�
 - **Persistence на Railway:** том має бути змонтований на `/data` (директорію), не на вкладений файл — інакше БД/фото не зберігаються між деплоями.
 - **Секрети (обов'язково в проді):** `JWT_SECRET`, `TOKEN_ENCRYPTION_KEY` (без них — публічний дефолт із коду). Опис змінних — у `CLAUDE.md`.
 - **Instagram/TikTok** потребують публічний HTTPS `SITE_URL` для медіа.
+- **Формат поста в Instagram** зберігається в `platform_posts.platformSettings` (`{format}`) і обирається у вкладці Instagram. `auto` = історична поведінка (формат за набором медіа). Карусель із відео першим слайдом **не потрапляє в стрічку Reels** — для охоплення потрібен `reels` або `slideshow`.
+- **Слайдшоу і кадр сторіз готуються на вимогу** (`/api/products/:id/instagram-media`) і лежать на товарі, щоб публікація за розкладом не чекала на ffmpeg у момент слоту.
 - **Ціна+націнка:** база в `products.price` не змінюється; націнка (per-product `priceMarkup` + per-platform з `user_settings.platform_markups`, додаються) застосовується лише до тексту поста при генерації.
 
 ## Що додано останнім часом (орієнтир)
 
+- **Instagram — усі чотири формати:** Reels, слайдшоу-Reels із фото, карусель, сторіз. Вибір формату на пості, підготовка похідного медіа через ffmpeg, опитування статусу контейнера замість фіксованих пауз.
+- **Графік публікацій** — `POSTING_SCHEDULE.md` (слоти тижня, типи товарів, безпечні ліміти).
 - **Kasta.ua** — дев'ята платформа.
 - **Безпека:** усунено reflected XSS (setup/facebook-setup), закрито незахищені адмін/debug-роути, обмеження типів файлів завантаження, оновлено вразливі залежності.
 - **Логотип/брендинг:** знак «P» у шапці, favicon, OG-зображення.
