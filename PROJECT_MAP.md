@@ -26,8 +26,10 @@ Instagram, TikTok, Shafa.ua, Prom.ua, OLX, Rozetka, Kasta.ua**. Деплой н�
 | `db/sqlite.ts` | Ініціалізація БД, `initDb()`, `ensureColumn` (ідемпотентні ALTER), `ensureUniqueIndex`. Єдине джерело схеми — міграцій-файлів немає. Тут же розв'язується `DB_PATH` (Railway `/data`). |
 | `ai-generator.ts` | OpenAI (Responses API): `generatePlatformPost`, `generatePostsForPlatforms(product, ids, markups?)`, `generateVideoTexts`, `applyPriceMarkup`/`applyProductMarkup` (націнка ±%). Модель — `OPENAI_MODEL`. |
 | `platforms/index.ts` | **Реєстр платформ.** `platforms: Record<PlatformId, PublishingPlatform>`, `getPlatform`, `enabledPlatformIds`. Кожна платформа = `generatePrompt(product)` + `publish(params)`. Промпти під кожну соцмережу/маркетплейс живуть тут. |
+| `posting-plan.ts` | Код-версія тижневого графіка: слоти стрічки й сторіз, київський час із урахуванням переходу годинника (`kyivTimeToUtc`, `generateSlots`). |
+| `notifications.ts` | Черга сповіщень і канал на кожного користувача. **Відправка — заглушка** (`deliverNotification`): подія пишеться в таблицю `notifications` з `deliveredAt = NULL`. |
 | `platform-types.ts` | Типи: `PlatformId`, `ProductInput` (вкл. `priceMarkup`), `PublishingPlatform`, `GeneratedPlatformPost`. |
-| `scheduler.ts` | Фоновий тик (45с) публікує заплановані пости; `publishPlatformPost()` (спільний для «опублікувати зараз»). Атомарний claim від подвійної публікації, `withRetry`, рефреш токенів (TikTok/OLX), збирання Telegram-кредів (chatId+login+соцпосилання). Синк статусів TikTok. |
+| `scheduler.ts` | Фоновий тик (45с): відновлення застряглих постів і підготовок, публікація запланованих, ретрай із відкладенням, антизалп, добова перевірка строку токенів і прибирання похідного медіа. Публікує заплановані пости; `publishPlatformPost()` (спільний для «опублікувати зараз»). Атомарний claim від подвійної публікації, `withRetry`, рефреш токенів (TikTok/OLX), збирання Telegram-кредів (chatId+login+соцпосилання). Синк статусів TikTok. |
 | `telegram.ts` | Telegram Bot API: `sendTelegramPost` (фото/відео/альбом/текст), `sendTelegramMediaGroup`, `sendTelegramMixedMediaGroup`, `editTelegramPost`. Кнопка «✍️ Написати» (per-user логін), `injectSocialLinks` (соцпосилання перед хештегами). Альбом → кнопка окремим повідомленням (обмеження Telegram). |
 | `facebook.ts` | Публікація на Facebook-сторінку (фото/відео/альбом), Graph API v25. |
 | `facebook-auth.ts` | Facebook OAuth (code grant): `buildAuthUrl`, `completeFacebookOAuth`, `selectFacebookPage(Manual)`, `getFacebookStatus`, `readEnv`/`writeEnvVars` (читає/пише `/data/.env` для глобального/адмін-конфігу). |
@@ -65,7 +67,7 @@ Instagram, TikTok, Shafa.ua, Prom.ua, OLX, Rozetka, Kasta.ua**. Деплой н�
 |------|----|
 | `CLAUDE.md` | Правила/архітектура для Claude Code (авто-завантажується новою сесією). |
 | `PROJECT_MAP.md` | Цей файл — детальна мапа. |
-| `POSTING_SCHEDULE.md` | Графік публікацій в Instagram: слоти тижня, типи товарів, ліміти, ємність каталогу. |
+| `POSTING_SCHEDULE.md` | Графік публікацій в Instagram: слоти тижня, типи товарів, ліміти, ємність каталогу. Код-версія — `src/posting-plan.ts`. |
 | `Dockerfile` | Node 22 + ffmpeg + fonts + `libheif-examples` (heif-convert для HEIC). Railway. |
 | `nixpacks.toml` | ffmpeg + libheif-examples для Railway-білду. |
 | `tsconfig.json`, `package.json` | Конфіг TS / залежності й скрипти. |
@@ -82,7 +84,8 @@ Instagram, TikTok, Shafa.ua, Prom.ua, OLX, Rozetka, Kasta.ua**. Деплой н�
 | `user_settings` | 1 рядок на юзера. `shop_name/description/language`, `facebook_page_url`, `instagram_url`, `telegram_chat_id`, **`telegram_order_login`** (логін для кнопки), **`telegram_social_links`** (JSON-масив), **`platform_markups`** (JSON `{платформа: %}`). Унікальний індекс на `telegram_chat_id`. |
 | `products` | Товар. `title, price, dropPrice, sizes, sizeSystem, colors, fabric, description, model, imageUrl, photoPath, video*`, `videoStyle`, `shopName/Description/Language`, **`priceMarkup`** (REAL, ±%), **`slideshowVideoPath/Url`** (Reels із фото), **`storyImagePath/Url`** (кадр для сторіз), **`bundleOf`** (JSON-масив id товарів — ознака добірки), `userId`, `generatedPost` (telegram-чернетка). |
 | `product_images` | Фото товару (багато-до-одного): `productId, imageUrl, photoPath, sortOrder`, **`igImagePath/igImageUrl`** (копія під вимоги Instagram; порожньо = ще не оброблено). |
-| `platform_posts` | Пост на платформу. `platform, text, status (draft/scheduled/publishing/published/failed), scheduledAt, publishedAt, externalPostId, externalChatId, errorMessage, platformSettings (JSON), platformStatus (JSON)`, **`formatKey`**. Для Instagram-студії рядків кілька на один товар — по одному на формат (`formatKey`); порожній `formatKey` = пост зі старого кабінету, де формат один на платформу. |
+| `notifications` | Черга сповіщень: `userId, kind, title, body, productId, platformPostId, createdAt, deliveredAt, deliveryError`. |
+| `platform_posts` | Пост на платформу. `attempts`/`nextAttemptAt` (ретрай), `platform, text, status (draft/scheduled/publishing/published/failed), scheduledAt, publishedAt, externalPostId, externalChatId, errorMessage, platformSettings (JSON), platformStatus (JSON)`, **`formatKey`**. Для Instagram-студії рядків кілька на один товар — по одному на формат (`formatKey`); порожній `formatKey` = пост зі старого кабінету, де формат один на платформу. |
 
 ## Каталог API-роутів (`src/server.ts`)
 
@@ -92,7 +95,7 @@ Instagram, TikTok, Shafa.ua, Prom.ua, OLX, Rozetka, Kasta.ua**. Деплой н�
 
 | Група | Роути |
 |-------|-------|
-| Товари/прев'ю | `POST /api/posts/preview`, `POST /api/posts/:productId/regenerate`, `GET/PUT /api/products/:id`, `GET /api/products`, `PUT /api/products/:id/video-choice`, **`POST /api/products/:id/instagram-media`** (`slideshow` / `story` / `carousel` — збирає слайдшоу-Reels, кадр сторіз або приводить фото до вимог IG), **`POST /api/products/bundle`** (добірка з 2–6 товарів → товар-добірка + слайдшоу + чернетка поста), **`POST /api/instagram/studio`** (завантаження → товар + фонова підготовка всіх форматів), **`GET /api/instagram/studio`** / **`GET /api/instagram/studio/:id`** (список і опитування стану), **`POST /api/instagram/studio/:id/rebuild`**, `POST /api/products/:id/publish`, legacy `/preview-post`, `/publish-preview`, `/products-api`. |
+| Товари/прев'ю | `POST /api/posts/preview`, `POST /api/posts/:productId/regenerate`, `GET/PUT /api/products/:id`, `GET /api/products`, `PUT /api/products/:id/video-choice`, **`POST /api/products/:id/instagram-media`** (`slideshow` / `story` / `carousel` — збирає слайдшоу-Reels, кадр сторіз або приводить фото до вимог IG), **`POST /api/products/bundle`** (добірка з 2–6 товарів → товар-добірка + слайдшоу + чернетка поста), **`POST /api/instagram/studio`** (завантаження → товар + фонова підготовка всіх форматів), **`GET /api/instagram/studio`** / **`GET /api/instagram/studio/:id`** (список і опитування стану), **`POST /api/instagram/studio/:id/rebuild`**, **`POST /api/instagram/schedule-plan`** (розкидання чернеток по слотах), **`GET /api/notifications`**, **`POST /api/settings/notifications`**, `POST /api/products/:id/publish`, legacy `/preview-post`, `/publish-preview`, `/products-api`. |
 | Пости | `PUT /api/platform-posts/:id`, `POST /api/platform-posts/:id/publish`, `GET /api/platform-posts/:id/status`. |
 | Акаунт/статус | `GET /api/user/social-status`, `DELETE /api/user/social/:platform`, `DELETE /api/account`, `GET /api/stats/summary`. |
 | Налаштування | `GET/POST /api/settings/shop`, `GET /api/settings/markups`, `POST /api/settings/markup`. |
@@ -141,6 +144,7 @@ Instagram, TikTok, Shafa.ua, Prom.ua, OLX, Rozetka, Kasta.ua**. Деплой н�
 - **HEIC з iPhone:** конвертація на завантаженні + зрозуміла відмова, якщо файл не читається.
 - **Добірка з кількох товарів:** один Reels зі слайдшоу з фото 2–6 товарів (`/api/products/bundle`, вибір на сторінці товарів).
 - **Instagram-студія** (`/instagram.html`): одне завантаження → Reels, слайдшоу, карусель із написами на фото і кадр сторіз, кожен формат окремим постом зі своїм часом публікації.
+- **Автопостинг без нагляду:** відновлення застряглих публікацій, ретрай із відкладенням, антизалп, контроль строку токена Instagram, прибирання похідного медіа, розкидання по слотах і черга сповіщень (відправка — заглушка).
 - **Графік публікацій** — `POSTING_SCHEDULE.md` (слоти тижня, типи товарів, безпечні ліміти).
 - **Kasta.ua** — дев'ята платформа.
 - **Безпека:** усунено reflected XSS (setup/facebook-setup), закрито незахищені адмін/debug-роути, обмеження типів файлів завантаження, оновлено вразливі залежності.

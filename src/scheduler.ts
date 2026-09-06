@@ -1,8 +1,11 @@
 import { getPlatform } from "./platforms";
 import { PlatformId, ProductInput } from "./platform-types";
-import { getUserTokens, saveUserToken } from "./user-tokens";
+import { saveUserToken } from "./user-tokens";
 import { getTikTokPublishStatus, refreshTikTokTokenRaw, TikTokTokens } from "./tiktok";
 import { refreshOlxToken } from "./olx";
+import { notifyUser, productOwnerId, recentlyNotified } from "./notifications";
+import { getUserTokens, tokenExpiryState } from "./user-tokens";
+import fs from "fs/promises";
 
 type Db = any;
 
@@ -373,31 +376,308 @@ export async function publishPlatformPost(db: Db, postId: number, extras?: Recor
   }
 }
 
-export async function publishDuePosts(db: Db) {
-  const duePosts = await db.all(
-    `
-    SELECT id
-    FROM platform_posts
-    WHERE status = 'scheduled'
-      AND scheduledAt IS NOT NULL
-      AND scheduledAt <= ?
-    ORDER BY scheduledAt ASC
-    LIMIT 10
-    `,
-    [new Date().toISOString()]
+// ── Автопостинг: живучість без нагляду ───────────────────────────────────────
+
+// Публікація Reels чекає на обробку відео в Instagram до 10 хв, Shafa через
+// Playwright — до 3 хв. Тому «зависанням» вважаємо тільки те, що триває довше
+// за будь-який легальний сценарій.
+const STUCK_AFTER_MS = 20 * 60_000;
+const MAX_PUBLISH_ATTEMPTS = 3;
+// Пауза перед повторами: коротка на випадок мережевого збою, довша — якщо
+// платформа справді лежить.
+const RETRY_DELAYS_MS = [10 * 60_000, 30 * 60_000];
+// Запобіжник від залпу: кілька постів, що припали на один час, не повинні
+// вилітати підряд за секунди — це ріже охоплення кожному з них.
+const MIN_GAP_BETWEEN_POSTS_MS = 15 * 60_000;
+const CLEANUP_INTERVAL_MS = 24 * 60 * 60_000;
+// Скільки днів тримати похідне медіа (оверлеї, слайдшоу, кадри сторіз) після
+// того, як з товаром уже все зроблено. Оригінали продавця не чіпаємо ніколи.
+const DERIVED_MEDIA_TTL_DAYS = 30;
+
+/**
+ * Контейнер на Railway перезапускається на кожному деплої. Якщо це стається
+ * посеред публікації, рядок лишається в статусі `publishing` — і більше ніколи
+ * не буде взятий (claim бере тільки те, що НЕ publishing/published).
+ *
+ * Свідомо НЕ повертаємо такі пости в чергу: якщо публікація насправді дійшла до
+ * платформи, а процес помер до запису результату, повтор дав би дубль. Тому
+ * позначаємо їх як провалені з поясненням — рішення за людиною.
+ */
+async function recoverStuckPosts(db: Db) {
+  const threshold = new Date(Date.now() - STUCK_AFTER_MS).toISOString();
+
+  // TikTok має власну асинхронну синхронізацію статусу — його не чіпаємо.
+  const stuck = await db.all(
+    `SELECT id, productId, platform FROM platform_posts
+     WHERE status = 'publishing' AND platform != 'tiktok' AND updatedAt <= ?`,
+    [threshold]
   );
 
+  for (const post of stuck) {
+    await db.run(
+      `UPDATE platform_posts
+       SET status = 'failed',
+           errorMessage = ?,
+           updatedAt = ?
+       WHERE id = ? AND status = 'publishing'`,
+      [
+        "Публікацію перервано (перезапуск сервера). Перевір у профілі, чи пост не вийшов, і опублікуй ще раз, якщо ні.",
+        new Date().toISOString(),
+        post.id,
+      ]
+    );
+    console.error(`[Recovery] Пост ${post.id} (${post.platform}) завис у publishing — позначено як провалений`);
+
+    const userId = await productOwnerId(db, post.productId);
+    if (userId) {
+      await notifyUser(db, {
+        userId,
+        kind: "publish_interrupted",
+        title: "Публікацію перервано",
+        body: `Пост #${post.id} (${post.platform}) лишився в стані «публікується» після перезапуску сервера. Перевір, чи він не вийшов, перш ніж публікувати повторно.`,
+        productId: post.productId,
+        platformPostId: post.id,
+      });
+    }
+  }
+
+  // Те саме для підготовки медіа в Instagram-студії: без цього товар назавжди
+  // лишається в «Готуємо…», а сторінка опитує його вічно.
+  const stuckProducts = await db.all(
+    `SELECT id, userId FROM products WHERE studioStatus = 'preparing' AND updatedAt <= ?`,
+    [threshold]
+  );
+
+  for (const product of stuckProducts) {
+    await db.run(
+      `UPDATE products SET studioStatus = 'failed', studioError = ?, updatedAt = ? WHERE id = ?`,
+      [
+        "Підготовку перервано (перезапуск сервера). Натисни «Спробувати ще раз».",
+        new Date().toISOString(),
+        product.id,
+      ]
+    );
+    console.error(`[Recovery] Товар ${product.id} завис у підготовці — позначено як провалений`);
+
+    const userId = await productOwnerId(db, product.id);
+    if (userId) {
+      await notifyUser(db, {
+        userId,
+        kind: "studio_failed",
+        title: "Підготовку постів перервано",
+        body: `Товар #${product.id}: підготовка медіа обірвалась через перезапуск сервера. Відкрий Instagram-студію і натисни «Спробувати ще раз».`,
+        productId: product.id,
+      });
+    }
+  }
+}
+
+/**
+ * Провал запланованої публікації — це ще не кінець: мережа й API платформ
+ * падають на хвилини. Повертаємо пост у чергу з паузою, і лише після кількох
+ * невдач лишаємо провал остаточним.
+ */
+async function scheduleRetry(db: Db, postId: number, error: unknown) {
+  const post = await db.get(`SELECT * FROM platform_posts WHERE id = ?`, [postId]);
+  if (!post) return;
+
+  const attempts = (Number(post.attempts) || 0) + 1;
+  const message = error instanceof Error ? error.message : String(error);
+  const now = new Date().toISOString();
+
+  if (attempts >= MAX_PUBLISH_ATTEMPTS) {
+    await db.run(
+      `UPDATE platform_posts SET status = 'failed', attempts = ?, nextAttemptAt = NULL, errorMessage = ?, updatedAt = ? WHERE id = ?`,
+      [attempts, message, now, postId]
+    );
+
+    const userId = await productOwnerId(db, post.productId);
+    if (userId) {
+      await notifyUser(db, {
+        userId,
+        kind: "publish_failed",
+        title: "Пост не опублікувався",
+        body: `Пост #${postId} (${post.platform}) не вдалося опублікувати за ${attempts} спроби. Причина: ${message}`,
+        productId: post.productId,
+        platformPostId: postId,
+      });
+    }
+    return;
+  }
+
+  const delay = RETRY_DELAYS_MS[Math.min(attempts - 1, RETRY_DELAYS_MS.length - 1)];
+  const nextAttemptAt = new Date(Date.now() + delay).toISOString();
+  await db.run(
+    `UPDATE platform_posts
+     SET status = 'scheduled', attempts = ?, nextAttemptAt = ?, errorMessage = ?, updatedAt = ?
+     WHERE id = ?`,
+    [attempts, nextAttemptAt, `${message} — повтор ${new Date(nextAttemptAt).toLocaleString("uk-UA")}`, now, postId]
+  );
+  console.log(`[Retry] Пост ${postId}: спроба ${attempts}, наступна о ${nextAttemptAt}`);
+}
+
+// Коли цей акаунт востаннє щось публікував на цю платформу.
+async function lastPublishedAt(db: Db, userId: string, platform: string) {
+  const row = await db.get(
+    `SELECT MAX(pp.publishedAt) AS last
+     FROM platform_posts pp
+     JOIN products p ON p.id = pp.productId
+     WHERE p.userId = ? AND pp.platform = ? AND pp.status = 'published' AND pp.publishedAt IS NOT NULL`,
+    [userId, platform]
+  );
+  return row?.last ? Date.parse(row.last) : 0;
+}
+
+/**
+ * Похідне медіа (оверлеї, слайдшоу, кадри сторіз, копії фото під Instagram)
+ * потрібне лише до публікації. Оригінали продавця не чіпаємо — вони і далі
+ * лежать у product_images.photoPath / products.videoPath.
+ */
+/**
+ * Токен Facebook живе ~60 днів і не оновлюється сам. Попереджаємо власника
+ * заздалегідь — інакше він дізнається про смерть токена з того, що тиждень
+ * постів мовчки не вийшов.
+ */
+async function warnAboutExpiringTokens(db: Db) {
+  const users = await db.all(`SELECT id FROM users`);
+  for (const user of users) {
+    try {
+      const tokens = await getUserTokens(db, user.id);
+      const state = tokenExpiryState(tokens.instagram?.expiresAt);
+      if (!state.expiringSoon && !state.expired) continue;
+      // Нагадуємо не частіше ніж раз на три дні.
+      if (await recentlyNotified(db, user.id, "token_expiring", 3 * 24 * 60 * 60_000)) continue;
+
+      await notifyUser(db, {
+        userId: user.id,
+        kind: "token_expiring",
+        title: state.expired ? "Доступ до Instagram закінчився" : "Доступ до Instagram скоро закінчиться",
+        body: state.expired
+          ? "Заплановані пости в Instagram не публікуватимуться. Перепідключи акаунт у Налаштуваннях."
+          : `Залишилось ${state.daysLeft} дн. Перепідключи акаунт у Налаштуваннях, щоб автопостинг не зупинився.`,
+      });
+    } catch (error) {
+      console.error(`[Tokens] Перевірка строку для користувача ${user.id} впала:`, error);
+    }
+  }
+}
+
+async function cleanupDerivedMedia(db: Db) {
+  const cutoff = new Date(Date.now() - DERIVED_MEDIA_TTL_DAYS * 24 * 60 * 60_000).toISOString();
+
+  const products = await db.all(
+    `SELECT id, processedVideoPath, slideshowVideoPath, storyImagePath
+     FROM products
+     WHERE updatedAt <= ?
+       AND (processedVideoPath IS NOT NULL OR slideshowVideoPath IS NOT NULL OR storyImagePath IS NOT NULL)
+       AND NOT EXISTS (
+         SELECT 1 FROM platform_posts pp
+         WHERE pp.productId = products.id AND pp.status IN ('draft', 'scheduled', 'publishing')
+       )
+     LIMIT 50`,
+    [cutoff]
+  );
+
+  let removed = 0;
+  for (const product of products) {
+    for (const field of ["processedVideoPath", "slideshowVideoPath", "storyImagePath"] as const) {
+      const filePath = String(product[field] || "");
+      if (!filePath) continue;
+      try {
+        await fs.rm(filePath, { force: true });
+        removed += 1;
+      } catch (error) {
+        console.error(`[Cleanup] Не вдалося видалити ${filePath}:`, error);
+      }
+    }
+    await db.run(
+      `UPDATE products
+       SET processedVideoPath = NULL, processedVideoUrl = NULL,
+           slideshowVideoPath = NULL, slideshowVideoUrl = NULL,
+           storyImagePath = NULL, storyImageUrl = NULL
+       WHERE id = ?`,
+      [product.id]
+    );
+  }
+
+  const images = await db.all(
+    `SELECT pi.id, pi.igImagePath, pi.photoPath
+     FROM product_images pi
+     JOIN products p ON p.id = pi.productId
+     WHERE p.updatedAt <= ? AND pi.igImagePath IS NOT NULL
+       AND NOT EXISTS (
+         SELECT 1 FROM platform_posts pp
+         WHERE pp.productId = p.id AND pp.status IN ('draft', 'scheduled', 'publishing')
+       )
+     LIMIT 200`,
+    [cutoff]
+  );
+
+  for (const image of images) {
+    const igPath = String(image.igImagePath || "");
+    // Якщо конвертація не знадобилась, у колонці лежить сам оригінал — його не чіпаємо.
+    if (igPath && igPath !== String(image.photoPath || "")) {
+      try {
+        await fs.rm(igPath, { force: true });
+        removed += 1;
+      } catch (error) {
+        console.error(`[Cleanup] Не вдалося видалити ${igPath}:`, error);
+      }
+    }
+    await db.run(`UPDATE product_images SET igImagePath = NULL, igImageUrl = NULL WHERE id = ?`, [image.id]);
+  }
+
+  if (removed) console.log(`[Cleanup] Видалено ${removed} похідних файлів`);
+}
+
+export async function publishDuePosts(db: Db) {
+  const now = new Date().toISOString();
+  const duePosts = await db.all(
+    `
+    SELECT pp.id, pp.platform, pp.productId, p.userId
+    FROM platform_posts pp
+    JOIN products p ON p.id = pp.productId
+    WHERE pp.status = 'scheduled'
+      AND pp.scheduledAt IS NOT NULL
+      AND pp.scheduledAt <= ?
+      AND (pp.nextAttemptAt IS NULL OR pp.nextAttemptAt <= ?)
+    ORDER BY pp.scheduledAt ASC
+    LIMIT 10
+    `,
+    [now, now]
+  );
+
+  // Один акаунт × одна платформа — не більше одного поста за прохід, і не
+  // раніше ніж через MIN_GAP_BETWEEN_POSTS_MS після попереднього. Інакше
+  // кілька постів, що припали на один час, вилітають підряд за секунди.
+  const publishedThisTick = new Set<string>();
+
   for (const post of duePosts) {
+    const key = `${post.userId}:${post.platform}`;
+    if (publishedThisTick.has(key)) continue;
+
+    const last = await lastPublishedAt(db, String(post.userId), post.platform);
+    if (last && Date.now() - last < MIN_GAP_BETWEEN_POSTS_MS) {
+      const nextAttemptAt = new Date(last + MIN_GAP_BETWEEN_POSTS_MS).toISOString();
+      await db.run(`UPDATE platform_posts SET nextAttemptAt = ? WHERE id = ?`, [nextAttemptAt, post.id]);
+      console.log(`[Spacing] Пост ${post.id} відкладено до ${nextAttemptAt} — зарано після попередньої публікації`);
+      continue;
+    }
+
     try {
       await publishPlatformPost(db, post.id);
+      publishedThisTick.add(key);
     } catch (error) {
       console.error("Scheduled publish error:", error);
+      await scheduleRetry(db, post.id, error);
     }
   }
 }
 
 export function startScheduler(db: Db) {
   let running = false;
+
+  let lastCleanup = 0;
 
   const tick = async () => {
     if (running) {
@@ -407,8 +687,18 @@ export function startScheduler(db: Db) {
     running = true;
 
     try {
+      await recoverStuckPosts(db);
       await publishDuePosts(db);
       await syncPendingTikTokPosts(db);
+
+      if (Date.now() - lastCleanup > CLEANUP_INTERVAL_MS) {
+        lastCleanup = Date.now();
+        await warnAboutExpiringTokens(db);
+        await cleanupDerivedMedia(db);
+      }
+    } catch (error) {
+      // Тік не має падати: наступний має відпрацювати попри збій у будь-якому кроці.
+      console.error("Scheduler tick error:", error);
     } finally {
       running = false;
     }

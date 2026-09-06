@@ -172,6 +172,10 @@ export async function initDb() {
   await ensureColumn(db, "products", "studioStatus", "TEXT");
   await ensureColumn(db, "products", "studioError", "TEXT");
   await ensureColumn(db, "user_settings", "telegram_chat_id", "TEXT");
+  // Куди слати сповіщення саме цьому користувачеві: у системі їх кілька, тож
+  // канал і адресат зберігаються на кожного окремо.
+  await ensureColumn(db, "user_settings", "notify_channel", "TEXT");
+  await ensureColumn(db, "user_settings", "notify_target", "TEXT");
   // Telegram post extras: the contact username the "✍️ Написати" button links to,
   // and a JSON array of the seller's social/marketplace URLs shown in the post body
   // (right before the hashtags). Both are Telegram-only and optional.
@@ -239,6 +243,28 @@ export async function initDb() {
 
     CREATE INDEX IF NOT EXISTS idx_platform_posts_schedule
       ON platform_posts(status, scheduledAt);
+
+    -- Черга сповіщень. Відправки ще немає (канал у кожного свій і його треба
+    -- підтвердити), тому події складаються сюди з deliveredAt = NULL: коли
+    -- зʼявиться реальний відправник, він просто розбере цю чергу.
+    CREATE TABLE IF NOT EXISTS notifications (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      userId INTEGER NOT NULL,
+      kind TEXT NOT NULL,
+      title TEXT NOT NULL,
+      body TEXT NOT NULL,
+      productId INTEGER,
+      platformPostId INTEGER,
+      createdAt TEXT NOT NULL,
+      deliveredAt TEXT,
+      deliveryError TEXT
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_notifications_user
+      ON notifications(userId, createdAt);
+
+    CREATE INDEX IF NOT EXISTS idx_notifications_undelivered
+      ON notifications(deliveredAt, createdAt);
   `);
 
   // Копія фото під вимоги Instagram (JPEG + співвідношення 4:5…1.91:1).
@@ -250,6 +276,11 @@ export async function initDb() {
   // пара (товар, платформа) більше не унікальна — формат розрізняє рядки.
   // Порожньо = пост зі старого кабінету, де формат один на платформу.
   await ensureColumn(db, "platform_posts", "formatKey", "TEXT");
+  // Автопостинг: скільки разів планувальник уже намагався опублікувати цей пост
+  // і коли можна пробувати наступного разу. Без цього один збій мережі о 19:30
+  // означав, що пост не вийде взагалі й ніхто про це не дізнається.
+  await ensureColumn(db, "platform_posts", "attempts", "INTEGER DEFAULT 0");
+  await ensureColumn(db, "platform_posts", "nextAttemptAt", "TEXT");
 
   // Platform-specific metadata stays on the individual post so scheduled
   // publishes use the exact settings the creator explicitly approved. TikTok

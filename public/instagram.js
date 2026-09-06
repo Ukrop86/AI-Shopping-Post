@@ -385,3 +385,112 @@ studioList.addEventListener("click", async event => {
 });
 
 loadProducts();
+
+// ── Автопостинг: розкидання по слотах ────────────────────────────────────────
+// Сервер сам ставить час усім чернеткам за тижневим графіком: рілси у вечірні
+// слоти, карусель в обідні, сторіз у свої вікна.
+
+document.getElementById("studioPlan").addEventListener("click", async event => {
+  const button = event.currentTarget;
+  button.disabled = true;
+  try {
+    const response = await fetch("/api/instagram/schedule-plan", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authHeaders() },
+      body: JSON.stringify({}),
+    });
+    const data = await response.json();
+    if (!response.ok || !data.success) throw new Error(data.message || "Не вдалося розкидати по слотах");
+    toast(data.message, data.skipped ? "loading" : "success");
+    await loadProducts();
+  } catch (error) {
+    toast(error.message, "error");
+  } finally {
+    button.disabled = false;
+  }
+});
+
+// Планувати в акаунт, чий доступ помер, немає сенсу — попереджаємо вгорі
+// сторінки, а не в момент нічного провалу.
+async function loadSocialStatus() {
+  try {
+    const response = await fetch("/api/user/social-status", { headers: authHeaders() });
+    const status = await response.json();
+    const alert = document.getElementById("studioAlert");
+
+    let message = "";
+    if (!status?.instagram) {
+      message = status?.instagramTokenExpired
+        ? "Термін дії доступу до Instagram минув — заплановані пости не вийдуть. Перепідключи акаунт у Налаштуваннях."
+        : "Instagram не підключено. Формати підготуються, але опублікувати їх не вийде — підключи акаунт у Налаштуваннях.";
+    } else if (status?.instagramTokenExpiringSoon) {
+      message = `Доступ до Instagram діє ще ${status.instagramTokenDaysLeft} дн. Перепідключи акаунт у Налаштуваннях, щоб автопостинг не зупинився.`;
+    }
+
+    alert.textContent = message;
+    alert.classList.toggle("hidden", !message);
+  } catch (error) {
+    console.error("social status failed", error);
+  }
+}
+
+// ── Сповіщення ───────────────────────────────────────────────────────────────
+
+const notifyChannel = document.getElementById("notifyChannel");
+const notifyTargetWrap = document.getElementById("notifyTargetWrap");
+const notifyTarget = document.getElementById("notifyTarget");
+const notifyState = document.getElementById("notifyState");
+
+function syncNotifyForm() {
+  const channel = notifyChannel.value;
+  notifyTargetWrap.classList.toggle("hidden", channel === "none");
+  document.getElementById("notifyTargetLabel").textContent =
+    channel === "telegram" ? "Chat ID у Telegram" : "Email";
+  notifyTarget.placeholder = channel === "telegram" ? "напр. 123456789" : "you@example.com";
+}
+
+notifyChannel.addEventListener("change", syncNotifyForm);
+
+document.getElementById("notifySave").addEventListener("click", async event => {
+  const button = event.currentTarget;
+  button.disabled = true;
+  try {
+    const response = await fetch("/api/settings/notifications", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authHeaders() },
+      body: JSON.stringify({ channel: notifyChannel.value, target: notifyTarget.value.trim() }),
+    });
+    const data = await response.json();
+    if (!response.ok || !data.success) throw new Error(data.message || "Не вдалося зберегти");
+    toast(data.message);
+    await loadNotifications();
+  } catch (error) {
+    toast(error.message, "error");
+  } finally {
+    button.disabled = false;
+  }
+});
+
+async function loadNotifications() {
+  try {
+    const response = await fetch("/api/notifications?limit=5", { headers: authHeaders() });
+    const data = await response.json();
+    if (!data.success) return;
+
+    notifyChannel.value = data.channel?.channel || "none";
+    notifyTarget.value = data.channel?.target || "";
+    syncNotifyForm();
+
+    const pending = (data.notifications || []).filter(item => !item.deliveredAt).length;
+    const last = data.notifications?.[0];
+    notifyState.textContent = last
+      ? `Останнє: ${last.title} — ${new Date(last.createdAt).toLocaleString("uk-UA")}. ` +
+        `Невручених подій: ${pending}. Відправка ще не увімкнена, події зберігаються в журналі.`
+      : "Подій ще не було. Відправка ще не увімкнена — поки що збої записуються в журнал.";
+  } catch (error) {
+    console.error("notifications failed", error);
+  }
+}
+
+loadSocialStatus();
+loadNotifications();

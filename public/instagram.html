@@ -145,12 +145,44 @@
         </div>
       </form>
 
+      <div class="studio-alert hidden" id="studioAlert"></div>
+
+      <section class="card notify-card">
+        <div class="section-label">
+          <span class="ico">🔔</span>
+          <h2>Сповіщення про збої</h2>
+        </div>
+        <p class="studio-hint">
+          Куди писати саме тобі, якщо запланований пост не вийде або підготовка обірветься.
+          Адреса зберігається окремо для кожного користувача.
+        </p>
+        <div class="notify-row">
+          <label>
+            Канал
+            <select id="notifyChannel">
+              <option value="none">Вимкнено</option>
+              <option value="telegram">Telegram</option>
+              <option value="email">Email</option>
+            </select>
+          </label>
+          <label id="notifyTargetWrap" class="hidden">
+            <span id="notifyTargetLabel">Адреса</span>
+            <input type="text" id="notifyTarget" placeholder="chat id або email" />
+          </label>
+          <button type="button" class="btn secondary" id="notifySave">Зберегти</button>
+        </div>
+        <p class="studio-note" id="notifyState"></p>
+      </section>
+
       <section class="section-title studio-list-title">
         <div class="section-label">
           <span class="ico">🗂</span>
           <h2>Підготовлені товари</h2>
         </div>
-        <button type="button" id="studioRefresh" class="btn ghost">Оновити</button>
+        <div class="studio-list-actions">
+          <button type="button" id="studioPlan" class="btn primary">Розкидати по слотах</button>
+          <button type="button" id="studioRefresh" class="btn ghost">Оновити</button>
+        </div>
       </section>
 
       <section id="studioList" class="products-list">Завантаження...</section>

@@ -95,6 +95,34 @@ shared dev app), Prom/Rozetka/Kasta use a personal token the seller pastes in th
 all), Shafa has no real API and drives the actual site via a per-user Playwright session
 (`src/shafa/`, `shafa.session.ts` persists the browser context so login doesn't repeat every publish).
 
+### Unattended autoposting (`src/scheduler.ts`, `src/posting-plan.ts`, `src/notifications.ts`)
+Everything below exists so a week of scheduled posts survives without anyone watching:
+
+- **Stuck rows are recovered, not resurrected.** The container restarts on every deploy; a row claimed as
+  `publishing` when that happens can never be claimed again. `recoverStuckPosts` marks anything publishing (or
+  any studio product still `preparing`) for more than 20 minutes as failed with an explanation. It deliberately
+  does **not** requeue: if the publish actually reached the platform before the process died, a retry would
+  post twice, so a human decides.
+- **A failed scheduled publish is retried** with a delay (`scheduleRetry`: 10 min, then 30, then final failure
+  after 3 attempts) — a five-minute outage at Meta used to mean the post simply never went out. The due query
+  honours `nextAttemptAt`, and any manual save or reschedule resets the counter.
+- **Posts never go out in a burst.** At most one post per user×platform per tick, and never within 15 minutes
+  of that account's previous publish; anything closer is pushed back. The weekly slot grid keeps real spacing
+  (≥4h) at planning time — this is only the runtime backstop.
+- **`POST /api/instagram/schedule-plan`** assigns times to draft studio posts from `posting-plan.ts`, the code
+  version of `POSTING_SCHEDULE.md`. Slots are Kyiv wall-clock and converted per date via `Intl`, so the DST
+  switch doesn't shift every post by an hour. Occupied slots are skipped; posts that don't fit stay drafts.
+- **Instagram token expiry is tracked.** The Facebook token that publishes to Instagram lasts ~60 days and
+  never refreshes itself; `getUserSocialStatus` now reports `instagram` as connected only while the token is
+  alive, exposes the expiry, and a daily pass warns the owner (at most once every three days). Scheduling into
+  a disconnected or expired account is rejected up front rather than failing overnight.
+- **Derived media is cleaned up** after 30 days once a product has nothing left to publish — overlaid videos,
+  slideshows, story frames and Instagram photo copies only. The seller's own uploads are never touched.
+- **Notifications have no sender yet, on purpose.** There are several users and an event must reach the owner
+  of that product, on a channel they chose and confirmed — so `notifications.ts` stores a per-user channel
+  (`user_settings.notify_channel`/`notify_target`) and queues every event in the `notifications` table with
+  `deliveredAt` NULL. `deliverNotification` is the single stub to replace; nothing is lost in the meantime.
+
 ### Publishing pipeline & scheduler (`src/scheduler.ts`)
 - `platform_posts` rows move through `draft → scheduled → publishing → published/failed`.
 - A background tick (`setInterval`, 45s) picks up due `scheduled` posts and publishes them; manual "publish

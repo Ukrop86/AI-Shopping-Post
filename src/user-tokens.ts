@@ -1,7 +1,7 @@
 import crypto from "crypto";
 
-export interface FbCreds { pageId: string; accessToken: string; pageName: string }
-export interface IgCreds { userId: string; accessToken: string }
+export interface FbCreds { pageId: string; accessToken: string; pageName: string; expiresAt?: number }
+export interface IgCreds { userId: string; accessToken: string; username?: string; expiresAt?: number }
 export interface TtCreds { accessToken: string; refreshToken: string; openId: string; expiresAt: number; refreshExpiresAt: number }
 export interface TelegramCreds { chatId: string; orderLogin?: string; socialLinks?: string[] }
 export interface PromCreds { accessToken: string; categoryId?: number; categoryName?: string }
@@ -64,9 +64,14 @@ export async function getUserTokens(db: any, userId: number): Promise<SocialToke
     const accessToken = decryptValue(r.access_token);
     const refreshToken = decryptValue(r.refresh_token);
     if (r.platform === "facebook" && r.page_id && accessToken) {
-      result.facebook = { pageId: r.page_id, accessToken, pageName: r.page_name || "" };
+      result.facebook = { pageId: r.page_id, accessToken, pageName: r.page_name || "", expiresAt: r.expires_at || undefined };
     } else if (r.platform === "instagram" && r.instagram_user_id && accessToken) {
-      result.instagram = { userId: r.instagram_user_id, accessToken };
+      result.instagram = {
+        userId: r.instagram_user_id,
+        accessToken,
+        username: r.instagram_username || undefined,
+        expiresAt: r.expires_at || undefined,
+      };
     } else if (r.platform === "tiktok" && accessToken) {
       result.tiktok = {
         accessToken,
@@ -173,12 +178,35 @@ export async function updateUserTokenMeta(db: any, userId: number, platform: str
   );
 }
 
+// Токен Facebook (а Instagram публікується саме ним) живе близько 60 днів.
+// Коли він помирає, кожна запланована публікація починає падати — тому строк
+// треба показувати заздалегідь, а не дізнаватися про нього з провалу вночі.
+export const TOKEN_EXPIRY_WARNING_MS = 7 * 24 * 60 * 60_000;
+
+export function tokenExpiryState(expiresAt?: number) {
+  if (!expiresAt) return { expiresAt: null, expired: false, expiringSoon: false, daysLeft: null };
+  const msLeft = expiresAt - Date.now();
+  return {
+    expiresAt: new Date(expiresAt).toISOString(),
+    expired: msLeft <= 0,
+    expiringSoon: msLeft > 0 && msLeft <= TOKEN_EXPIRY_WARNING_MS,
+    daysLeft: Math.max(0, Math.floor(msLeft / (24 * 60 * 60_000))),
+  };
+}
+
 export async function getUserSocialStatus(db: any, userId: number) {
   const tokens = await getUserTokens(db, userId);
+  const instagramExpiry = tokenExpiryState(tokens.instagram?.expiresAt);
   return {
     facebook: !!tokens.facebook,
     facebookPageName: tokens.facebook?.pageName || null,
-    instagram: !!tokens.instagram,
+    // «Підключено» = токен ще живий: рядок у базі сам по собі нічого не гарантує.
+    instagram: !!tokens.instagram && !instagramExpiry.expired,
+    instagramUsername: tokens.instagram?.username || null,
+    instagramTokenExpiresAt: instagramExpiry.expiresAt,
+    instagramTokenExpired: instagramExpiry.expired,
+    instagramTokenExpiringSoon: instagramExpiry.expiringSoon,
+    instagramTokenDaysLeft: instagramExpiry.daysLeft,
     tiktok: !!tokens.tiktok && (tokens.tiktok.expiresAt > Date.now()),
     prom: !!tokens.prom,
     promCategoryName: tokens.prom?.categoryName || null,

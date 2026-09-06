@@ -17,6 +17,8 @@ import {
 import { initDb } from "./db/sqlite";
 import { editTelegramPost } from "./telegram";
 import { enabledPlatformIds, isPlatformId, instagramFormatPrompt } from "./platforms";
+import { generateSlots, PlanFormat, slotKindFor } from "./posting-plan";
+import { getUserNotificationChannel, listNotifications } from "./notifications";
 import { PlatformId, ProductInput } from "./platform-types";
 import { publishPlatformPost, startScheduler, syncTikTokPublishingPost } from "./scheduler";
 import {
@@ -1130,6 +1132,21 @@ async function startServer() {
 
       const text = toText(req.body.text) || post.text;
       const status = toText(req.body.status) || post.status;
+
+      // Планувати публікацію в акаунт, який не підключений (або чий токен уже
+      // помер), означає гарантований провал уночі за розкладом. Кажемо про це
+      // одразу, поки людина дивиться на екран.
+      if (status === "scheduled" && post.platform === "instagram") {
+        const socialStatus = await getUserSocialStatus(db, currentUserId(req));
+        if (!socialStatus.instagram) {
+          return res.status(400).json({
+            success: false,
+            message: socialStatus.instagramTokenExpired
+              ? "Термін дії доступу до Instagram минув. Перепідключи акаунт у Налаштуваннях, інакше пост не опублікується."
+              : "Instagram не підключено. Відкрий Налаштування → вкладка Instagram.",
+          });
+        }
+      }
       const scheduledAt = req.body.scheduledAt
         ? new Date(String(req.body.scheduledAt)).toISOString()
         : null;
@@ -1152,6 +1169,10 @@ async function startServer() {
             scheduledAt = ?,
             platformSettings = ?,
             errorMessage = NULL,
+            -- Ручне збереження/перепланування — це нова спроба з чистого аркуша,
+            -- інакше пост, що вже тричі впав, згорів би на першій же помилці.
+            attempts = 0,
+            nextAttemptAt = NULL,
             updatedAt = ?
         WHERE id = ?
         `,
@@ -1865,6 +1886,155 @@ async function startServer() {
     }
   });
 
+  // Сповіщення. Відправки поки немає (див. notifications.ts), але адресат
+  // зберігається на кожного користувача окремо — саме це й треба, щоб потім
+  // подія пішла тій людині, чий це товар, а не в спільний канал.
+  const NOTIFY_CHANNELS = ["none", "telegram", "email"];
+
+  app.get("/api/notifications", ...requireUser, async (req: Request, res: Response) => {
+    const userId = currentUserId(req);
+    const [channel, items] = await Promise.all([
+      getUserNotificationChannel(db, userId),
+      listNotifications(db, userId, Number(req.query.limit) || 30),
+    ]);
+    res.json({ success: true, channel, notifications: items, deliveryEnabled: false });
+  });
+
+  app.post("/api/settings/notifications", ...requireUser, async (req: Request, res: Response) => {
+    const channel = toText(req.body.channel) || "none";
+    const target = toText(req.body.target);
+
+    if (!NOTIFY_CHANNELS.includes(channel)) {
+      return res.status(400).json({ success: false, message: "Невідомий канал сповіщень" });
+    }
+    if (channel !== "none" && !target) {
+      return res.status(400).json({ success: false, message: "Вкажи, куди слати сповіщення" });
+    }
+    if (channel === "email" && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(target)) {
+      return res.status(400).json({ success: false, message: "Схоже, це не email" });
+    }
+
+    const userId = currentUserId(req);
+    const now = new Date().toISOString();
+    await db.run(
+      `INSERT INTO user_settings (user_id, notify_channel, notify_target, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(user_id) DO UPDATE SET
+         notify_channel = excluded.notify_channel,
+         notify_target = excluded.notify_target,
+         updated_at = excluded.updated_at`,
+      [userId, channel, channel === "none" ? "" : target, now, now]
+    );
+
+    res.json({
+      success: true,
+      channel: { channel, target: channel === "none" ? "" : target },
+      // Чесно кажемо стан речей: адресата збережено, але відправника ще немає.
+      message: channel === "none"
+        ? "Сповіщення вимкнено"
+        : "Адресата збережено. Відправка ще не увімкнена — події поки накопичуються в журналі.",
+    });
+  });
+
+  // Розкидання по слотах: бере готові чернетки Instagram і розставляє їм час за
+  // тижневим графіком (`posting-plan.ts` = код-версія POSTING_SCHEDULE.md).
+  // Слоти рахуються в київському часі, зайняті — пропускаються.
+  const PLAN_HORIZON_DAYS = 28;
+  const PLAN_LEAD_MS = 30 * 60_000;
+
+  app.post("/api/instagram/schedule-plan", ...requireUser, async (req: Request, res: Response) => {
+    try {
+      const userId = currentUserId(req);
+
+      const socialStatus = await getUserSocialStatus(db, userId);
+      if (!socialStatus.instagram) {
+        return res.status(400).json({
+          success: false,
+          message: socialStatus.instagramTokenExpired
+            ? "Термін дії доступу до Instagram минув — перепідключи акаунт, інакше заплановані пости не вийдуть."
+            : "Instagram не підключено. Відкрий Налаштування → вкладка Instagram.",
+        });
+      }
+
+      const requestedIds = Array.isArray(req.body.productIds)
+        ? req.body.productIds.map((id: unknown) => Number(id)).filter((id: number) => Number.isInteger(id))
+        : null;
+
+      const drafts = await db.all(
+        `SELECT pp.id, pp.formatKey, pp.productId
+         FROM platform_posts pp
+         JOIN products p ON p.id = pp.productId
+         WHERE p.userId = ? AND pp.platform = 'instagram' AND pp.status = 'draft'
+           AND pp.formatKey IS NOT NULL
+         ORDER BY pp.productId ASC, pp.id ASC`,
+        [String(userId)]
+      );
+
+      const posts = requestedIds
+        ? drafts.filter((post: any) => requestedIds.includes(post.productId))
+        : drafts;
+
+      if (!posts.length) {
+        return res.json({ success: true, scheduled: [], skipped: 0, message: "Немає чернеток для планування" });
+      }
+
+      // Уже зайняті слоти цього користувача — щоб не ставити два пости на один час.
+      const busyRows = await db.all(
+        `SELECT pp.scheduledAt
+         FROM platform_posts pp
+         JOIN products p ON p.id = pp.productId
+         WHERE p.userId = ? AND pp.platform = 'instagram'
+           AND pp.status IN ('scheduled', 'publishing') AND pp.scheduledAt IS NOT NULL`,
+        [String(userId)]
+      );
+      const busy = new Set<number>(
+        busyRows.map((row: any) => Math.floor(Date.parse(row.scheduledAt) / 60_000))
+      );
+
+      const slots = generateSlots(new Date(Date.now() + PLAN_LEAD_MS), PLAN_HORIZON_DAYS);
+      const scheduled: { postId: number; productId: number; format: string; scheduledAt: string }[] = [];
+      let skipped = 0;
+
+      for (const post of posts) {
+        const wanted = slotKindFor(post.formatKey as PlanFormat);
+        const slot = slots.find(
+          (candidate) => candidate.kind === wanted && !busy.has(Math.floor(candidate.at.getTime() / 60_000))
+        );
+
+        if (!slot) {
+          skipped += 1;
+          continue;
+        }
+
+        busy.add(Math.floor(slot.at.getTime() / 60_000));
+        const scheduledAt = slot.at.toISOString();
+        await db.run(
+          `UPDATE platform_posts
+           SET status = 'scheduled', scheduledAt = ?, attempts = 0, nextAttemptAt = NULL,
+               errorMessage = NULL, updatedAt = ?
+           WHERE id = ?`,
+          [scheduledAt, new Date().toISOString(), post.id]
+        );
+        scheduled.push({ postId: post.id, productId: post.productId, format: post.formatKey, scheduledAt });
+      }
+
+      return res.json({
+        success: true,
+        scheduled,
+        skipped,
+        message: skipped
+          ? `Заплановано ${scheduled.length}, не вистачило вільних слотів на ${skipped} — постав час вручну або спробуй пізніше.`
+          : `Заплановано ${scheduled.length} постів за графіком.`,
+      });
+    } catch (error) {
+      console.error("Schedule plan error:", error);
+      return res.status(500).json({
+        success: false,
+        message: error instanceof Error ? error.message : "Не вдалося розкидати по слотах",
+      });
+    }
+  });
+
   // Список товарів студії — сторінка малює з нього картки форматів.
   app.get("/api/instagram/studio", ...requireUser, async (req: Request, res: Response) => {
     try {
@@ -2293,6 +2463,9 @@ async function startServer() {
         access_token: fbToken,
         instagram_user_id: instagramId.trim(),
         instagram_username: instagramUsername?.trim().replace(/^@/, "") || "",
+        // Це той самий токен Facebook — отже, і строк життя в нього той самий.
+        // Без цього ручне підключення виглядало б вічним, а помирало б мовчки.
+        expires_at: tokens.facebook?.expiresAt,
       });
       res.json({ success: true });
     } catch (err) {
