@@ -817,6 +817,56 @@ textarea {
 
 .schedule-row { max-width: 260px; }
 
+/* ── Добірка з кількох товарів ────────────────────────── */
+.bundle-bar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 260px) auto;
+  align-items: center;
+  gap: 14px;
+  position: sticky;
+  top: 12px;
+  z-index: 5;
+}
+
+.bundle-bar-info small {
+  display: block;
+  margin-top: 3px;
+  color: var(--text2);
+  font-size: 12px;
+}
+
+.bundle-bar-actions { display: flex; gap: 8px; }
+
+.bundle-message {
+  grid-column: 1 / -1;
+  margin: 0;
+  color: var(--text2);
+  font-size: 13px;
+}
+
+.bundle-message.done { color: var(--accent); }
+
+.bundle-pick {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text2);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.product-top-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+@media (max-width: 720px) {
+  .bundle-bar { grid-template-columns: minmax(0, 1fr); position: static; }
+  .bundle-bar-actions { justify-content: flex-end; }
+}
+
 /* ── Instagram publishing format ─────────────────────── */
 .instagram-settings-card {
   display: grid;

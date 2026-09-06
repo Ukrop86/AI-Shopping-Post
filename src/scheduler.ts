@@ -43,6 +43,7 @@ async function getProductInput(db: Db, productId: number): Promise<ProductInput>
     fabric: product.fabric || "",
     description: product.description || "",
     imageUrls: images.map((image: any) => image.imageUrl),
+    igImageUrls: images.map((image: any) => image.igImageUrl || image.imageUrl),
     photoPaths: images.map((image: any) => image.photoPath),
     videoUrl: product.videoUrl || undefined,
     videoPath: product.videoPath || undefined,

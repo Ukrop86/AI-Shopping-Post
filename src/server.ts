@@ -9,6 +9,7 @@ import {
   generatePlatformPost,
   generatePostsForPlatforms,
   generateVideoTexts,
+  applyPriceMarkup,
   applyProductMarkup,
 } from "./ai-generator";
 import { initDb } from "./db/sqlite";
@@ -17,6 +18,7 @@ import { enabledPlatformIds, isPlatformId } from "./platforms";
 import { PlatformId, ProductInput } from "./platform-types";
 import { publishPlatformPost, startScheduler, syncTikTokPublishingPost } from "./scheduler";
 import {
+  createInstagramImage,
   createReelsStyleVideo,
   createSlideshowReel,
   createStoryFrame,
@@ -629,6 +631,49 @@ async function updateProductFields(db: any, productId: number, body: any) {
   );
 }
 
+// Instagram приймає тільки JPEG зі співвідношенням 4:5…1.91:1, тож PNG/WEBP і
+// звичайне вертикальне фото з телефона Graph API відхиляє. Готуємо копії заздалегідь
+// (у фоні після створення товару), щоб публікація за розкладом не впала на цьому.
+async function prepareInstagramImages(db: any, productId: number) {
+  const images = await db.all(
+    `SELECT id, photoPath, imageUrl FROM product_images WHERE productId = ? ORDER BY sortOrder ASC, id ASC`,
+    [productId]
+  );
+
+  let prepared = 0;
+  for (const [index, image] of images.entries()) {
+    const photoPath = String(image.photoPath || "");
+    if (!photoPath) continue;
+
+    try {
+      const converted = await createInstagramImage({ inputPath: photoPath, uploadsDir, index });
+      // Якщо конвертація не потрібна (оригінал уже відповідає вимогам), зайвого
+      // файлу не створюємо, але колонки все одно заповнюємо оригіналом — так
+      // порожнє значення однозначно означає «ще не оброблено».
+      await db.run(`UPDATE product_images SET igImagePath = ?, igImageUrl = ? WHERE id = ?`, [
+        converted?.outputPath || photoPath,
+        converted ? filePathToPublicUrl(converted.outputPath) : image.imageUrl,
+        image.id,
+      ]);
+      if (converted) prepared += 1;
+    } catch (error) {
+      // Фото могло бути в форматі, який ffmpeg не декодує (напр. HEIC без libheif).
+      // Лишаємо оригінал: публікація впаде з конкретною помилкою Instagram,
+      // а не зіпсує весь товар.
+      console.error(`[Instagram] Не вдалося підготувати фото ${photoPath}:`, error);
+    }
+  }
+  return { total: images.length, prepared };
+}
+
+function prepareInstagramImagesInBackground(db: any, productId: number) {
+  prepareInstagramImages(db, productId)
+    .then(({ total, prepared }) =>
+      console.log(`[Instagram] Фото товару ${productId}: підготовлено ${prepared} з ${total}`)
+    )
+    .catch((error) => console.error(`[Instagram] Підготовка фото товару ${productId} впала:`, error));
+}
+
 async function generateProcessedVideo(product: ProductInput) {
   if (!product.videoPath || product.generateVideo === false) {
     return null;
@@ -684,6 +729,8 @@ async function startServer() {
 
         // Return response immediately — don't block on FFmpeg video processing
         res.json({ success: true, ...details, productId, videoProcessing: !!product.videoPath });
+
+        prepareInstagramImagesInBackground(db, productId);
 
         // Process video in background after response is sent
         if (product.videoPath) {
@@ -1509,6 +1556,160 @@ async function startServer() {
     }
   });
 
+  // Добірка: один Reels зі слайдшоу з фото кількох товарів («5 образів до 1000 грн»).
+  // Технічно це звичайний товар — так добірка проходить тим самим шляхом
+  // товар → пост → планувальник, без окремої гілки в публікації.
+  const BUNDLE_MIN_PRODUCTS = 2;
+  const BUNDLE_MAX_PRODUCTS = 6;
+  const BUNDLE_MAX_SLIDES = 6;
+
+  app.post("/api/products/bundle", ...requireUser, async (req: Request, res: Response) => {
+    try {
+      const userId = currentUserId(req);
+      const rawIds = Array.isArray(req.body.productIds) ? req.body.productIds : [];
+      const productIds = [...new Set(rawIds.map((id: unknown) => Number(id)))].filter(
+        (id): id is number => Number.isInteger(id) && (id as number) > 0
+      );
+
+      if (productIds.length < BUNDLE_MIN_PRODUCTS || productIds.length > BUNDLE_MAX_PRODUCTS) {
+        return res.status(400).json({
+          success: false,
+          message: `Для добірки вибери від ${BUNDLE_MIN_PRODUCTS} до ${BUNDLE_MAX_PRODUCTS} товарів`,
+        });
+      }
+
+      const sources = [];
+      for (const productId of productIds) {
+        const details = await getOwnedProductDetails(db, productId, userId);
+        if (!details) {
+          return res.status(404).json({ success: false, message: `Товар #${productId} не знайдено` });
+        }
+        const images = details.images.filter((image: any) => image.photoPath);
+        if (!images.length) {
+          return res.status(400).json({
+            success: false,
+            message: `У товару «${details.product.title || productId}» немає фото — його не можна додати в добірку`,
+          });
+        }
+        sources.push({ product: details.product, images });
+      }
+
+      // Один кадр на товар; якщо товарів мало — добираємо другі фото, щоб
+      // ролик не виходив на два слайди.
+      const slides: any[] = [];
+      for (let round = 0; round < 3 && slides.length < BUNDLE_MAX_SLIDES; round++) {
+        if (round > 0 && sources.length >= 4) break;
+        for (const source of sources) {
+          if (slides.length >= BUNDLE_MAX_SLIDES) break;
+          if (source.images[round]) slides.push(source.images[round]);
+        }
+      }
+
+      const platformMarkups = await getPlatformMarkups(db, userId);
+      const itemLines = sources.map((source, index) => {
+        const markup = (Number(source.product.priceMarkup) || 0) + (platformMarkups.instagram || 0);
+        const price = applyPriceMarkup(source.product.price, markup) || "ціна не вказана";
+        return `${index + 1}) ${source.product.title || "без назви"} — ${price}`;
+      });
+
+      const title = toText(req.body.title) || `Добірка · ${sources.length} образів`;
+      const description = [
+        `Це добірка з ${sources.length} товарів магазину, а не один товар.`,
+        "Позиції добірки:",
+        ...itemLines,
+        "Напиши пост про всю добірку: коротко про кожну позицію з ціною і спільний заклик у кінці.",
+      ].join("\n");
+
+      const settings = await getUserSettings(db, userId);
+      const bundleProduct: ProductInput = {
+        title,
+        price: "",
+        description,
+        imageUrls: slides.map((image) => image.imageUrl),
+        photoPaths: slides.map((image) => image.photoPath),
+        videoStyle: "fashion",
+        shopName: settings.shopName || undefined,
+        shopDescription: settings.shopDescription || undefined,
+        shopLanguage: settings.shopLanguage || undefined,
+      };
+
+      // Текст генеруємо першим: якщо OpenAI недоступний, нічого не створено
+      // і не витрачено час на ffmpeg.
+      const text = await generatePlatformPost(bundleProduct, "instagram");
+
+      const now = new Date().toISOString();
+      const inserted = await db.run(
+        `INSERT INTO products (
+           userId, createdAt, updatedAt, title, price, description,
+           imageUrl, photoPath, videoStyle, priceMarkup,
+           generateVideo, useProcessedVideo, bundleOf,
+           shopName, shopDescription, shopLanguage
+         ) VALUES (?,?,?,?,?,?,?,?,?,?,0,1,?,?,?,?)`,
+        [
+          String(userId), now, now, title, "", description,
+          slides[0]?.imageUrl || null, slides[0]?.photoPath || null, "fashion", 0,
+          JSON.stringify(productIds),
+          settings.shopName || null, settings.shopDescription || null, settings.shopLanguage || null,
+        ]
+      );
+      const bundleId = inserted.lastID as number;
+
+      for (const [index, image] of slides.entries()) {
+        await db.run(
+          `INSERT INTO product_images (productId, imageUrl, photoPath, sortOrder, createdAt, igImagePath, igImageUrl)
+           VALUES (?,?,?,?,?,?,?)`,
+          [
+            bundleId,
+            image.imageUrl,
+            image.photoPath,
+            index,
+            now,
+            image.igImagePath || null,
+            image.igImageUrl || null,
+          ]
+        );
+      }
+
+      let videoTexts;
+      try {
+        videoTexts = await generateVideoTexts({ ...bundleProduct, price: "" });
+      } catch (error) {
+        console.error("Bundle slideshow texts failed, using defaults:", error);
+      }
+
+      const slideshow = await createSlideshowReel({
+        photoPaths: bundleProduct.photoPaths,
+        uploadsDir,
+        videoTexts,
+        videoStyle: "fashion",
+      });
+      const slideshowVideoUrl = filePathToPublicUrl(slideshow.outputPath);
+      await db.run(
+        `UPDATE products SET slideshowVideoPath = ?, slideshowVideoUrl = ?, updatedAt = ? WHERE id = ?`,
+        [slideshow.outputPath, slideshowVideoUrl, now, bundleId]
+      );
+
+      await db.run(
+        `INSERT INTO platform_posts (productId, platform, text, status, platformSettings, createdAt, updatedAt)
+         VALUES (?, 'instagram', ?, 'draft', ?, ?, ?)`,
+        [bundleId, text, JSON.stringify({ format: "slideshow" }), now, now]
+      );
+
+      return res.json({
+        success: true,
+        productId: bundleId,
+        slideshow: { url: slideshowVideoUrl, durationSec: slideshow.durationSec, photosUsed: slideshow.photosUsed },
+        ...(await getProductDetails(db, bundleId)),
+      });
+    } catch (error) {
+      console.error("Bundle error:", error);
+      return res.status(500).json({
+        success: false,
+        message: error instanceof Error ? error.message : "Не вдалося зібрати добірку",
+      });
+    }
+  });
+
   // Готує похідне медіа для Instagram: слайдшоу-Reels із фото товару або кадр
   // 9:16 для сторіз. Робиться на вимогу (а не при кожному завантаженні товару),
   // і результат зберігається на товарі — щоб публікація за розкладом брала
@@ -1523,10 +1724,10 @@ async function startServer() {
       }
 
       const format = toText(req.body.format);
-      if (format !== "slideshow" && format !== "story") {
+      if (format !== "slideshow" && format !== "story" && format !== "carousel") {
         return res.status(400).json({
           success: false,
-          message: "Готувати медіа треба лише для форматів «слайдшоу» і «сторіз»",
+          message: "Готувати медіа треба лише для форматів «слайдшоу», «сторіз» і «карусель»",
         });
       }
 
@@ -1535,6 +1736,16 @@ async function startServer() {
         .filter(Boolean);
       if (!photoPaths.length) {
         return res.status(400).json({ success: false, message: "Спочатку завантаж фото товару" });
+      }
+
+      if (format === "carousel") {
+        const { total, prepared } = await prepareInstagramImages(db, productId);
+        return res.json({
+          success: true,
+          // Не `images` — цим ключем нижче йде сам список фото товару.
+          imagesPrepared: { total, prepared },
+          ...(await getProductDetails(db, productId)),
+        });
       }
 
       const product = details.product;

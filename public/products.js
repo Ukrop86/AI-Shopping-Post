@@ -1,4 +1,14 @@
 const productsList = document.getElementById("productsList");
+const bundleBar = document.getElementById("bundleBar");
+const bundleCount = document.getElementById("bundleCount");
+const bundleTitle = document.getElementById("bundleTitle");
+const bundleMessage = document.getElementById("bundleMessage");
+const bundleCreate = document.getElementById("bundleCreate");
+const bundleClear = document.getElementById("bundleClear");
+
+// Добірка = один Reels зі слайдшоу з фото кількох товарів. Вибір живе поза
+// розміткою списку, щоб не злітати при перемальовуванні після фільтрів.
+const bundleSelection = new Set();
 const productsSearch = document.getElementById("productsSearch");
 const platformFilter = document.getElementById("platformFilter");
 const statusFilter = document.getElementById("statusFilter");
@@ -136,9 +146,15 @@ function renderProducts(products) {
             <div class="product-top">
               <div>
                 <h2>${escapeHtml(product.title || "Без назви")}</h2>
-                <p>Артикул: ${escapeHtml(product.model || "не вказано")}</p>
+                <p>${product.bundleOf ? "Добірка з кількох товарів" : `Артикул: ${escapeHtml(product.model || "не вказано")}`}</p>
               </div>
-              <span class="small-badge">#${product.id}</span>
+              <div class="product-top-right">
+                <label class="bundle-pick">
+                  <input type="checkbox" class="bundle-checkbox" value="${product.id}" ${bundleSelection.has(product.id) ? "checked" : ""}>
+                  <span>У добірку</span>
+                </label>
+                <span class="small-badge">#${product.id}</span>
+              </div>
             </div>
 
             <div class="grid">
@@ -309,6 +325,70 @@ productsList.addEventListener("click", async (event) => {
     message.className = "product-message error-text";
   } finally {
     button.disabled = false;
+  }
+});
+
+function renderBundleBar() {
+  const count = bundleSelection.size;
+  bundleBar.hidden = count === 0 && !bundleMessage.classList.contains("done");
+  bundleCount.textContent = `Обрано ${count} ${count === 1 ? "товар" : count < 5 ? "товари" : "товарів"}`;
+  bundleCreate.disabled = count < 2 || count > 6;
+  if (count === 1) {
+    bundleMessage.textContent = "Для добірки потрібно щонайменше 2 товари";
+    bundleMessage.className = "bundle-message";
+  } else if (count > 6) {
+    bundleMessage.textContent = "Максимум 6 товарів на добірку";
+    bundleMessage.className = "bundle-message error-text";
+  } else if (!bundleMessage.classList.contains("done")) {
+    bundleMessage.textContent = "";
+  }
+}
+
+productsList.addEventListener("change", (event) => {
+  const checkbox = event.target.closest(".bundle-checkbox");
+  if (!checkbox) return;
+  const productId = Number(checkbox.value);
+  if (checkbox.checked) bundleSelection.add(productId);
+  else bundleSelection.delete(productId);
+  bundleMessage.className = "bundle-message";
+  renderBundleBar();
+});
+
+bundleClear.addEventListener("click", () => {
+  bundleSelection.clear();
+  productsList.querySelectorAll(".bundle-checkbox").forEach((box) => { box.checked = false; });
+  bundleMessage.textContent = "";
+  bundleMessage.className = "bundle-message";
+  renderBundleBar();
+});
+
+bundleCreate.addEventListener("click", async () => {
+  bundleCreate.disabled = true;
+  bundleMessage.className = "bundle-message";
+  bundleMessage.textContent = "Збираємо слайдшоу — це займає до хвилини...";
+
+  try {
+    const response = await fetch("/api/products/bundle", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authHeaders() },
+      body: JSON.stringify({
+        productIds: [...bundleSelection],
+        title: bundleTitle.value.trim() || undefined,
+      }),
+    });
+    const data = await response.json();
+    if (!response.ok || !data.success) throw new Error(data.message || "Не вдалося зібрати добірку");
+
+    bundleSelection.clear();
+    bundleTitle.value = "";
+    bundleMessage.textContent = `Добірку створено (#${data.productId}, ${data.slideshow.photosUsed} кадрів, ${data.slideshow.durationSec} с). Текст і час — у картці добірки нижче.`;
+    bundleMessage.className = "bundle-message done";
+    await loadProducts();
+  } catch (error) {
+    bundleMessage.textContent = error.message;
+    bundleMessage.className = "bundle-message error-text";
+  } finally {
+    renderBundleBar();
   }
 });
 

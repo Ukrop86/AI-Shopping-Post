@@ -156,8 +156,12 @@ ${commonRules(product)}
       throw new Error("Instagram потребує фото або відео товару для публікації");
     }
 
+    // Для публікації беремо копії, приведені до вимог Instagram (JPEG,
+    // 4:5…1.91:1); якщо копії немає — оригінал уже підходить.
+    const igImages = product.igImageUrls?.length ? product.igImageUrls : imageUrls;
+
     const creds = (extras?.userTokens as any)?.instagram;
-    const result = await publishInstagramPost(imageUrls[0], text, videoUrl, imageUrls, creds, {
+    const result = await publishInstagramPost(igImages[0], text, videoUrl, igImages, creds, {
       format,
       slideshowVideoUrl: product.slideshowVideoUrl,
       storyImageUrl: product.storyImageUrl,

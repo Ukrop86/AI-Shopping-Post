@@ -166,6 +166,8 @@ export async function initDb() {
   await ensureColumn(db, "products", "slideshowVideoUrl", "TEXT");
   await ensureColumn(db, "products", "storyImagePath", "TEXT");
   await ensureColumn(db, "products", "storyImageUrl", "TEXT");
+  // Товар-добірка: JSON-масив id товарів, з фото яких зібрано слайдшоу.
+  await ensureColumn(db, "products", "bundleOf", "TEXT");
   await ensureColumn(db, "user_settings", "telegram_chat_id", "TEXT");
   // Telegram post extras: the contact username the "✍️ Написати" button links to,
   // and a JSON array of the seller's social/marketplace URLs shown in the post body
@@ -235,6 +237,12 @@ export async function initDb() {
     CREATE INDEX IF NOT EXISTS idx_platform_posts_schedule
       ON platform_posts(status, scheduledAt);
   `);
+
+  // Копія фото під вимоги Instagram (JPEG + співвідношення 4:5…1.91:1).
+  // Порожньо = фото ще не оброблялося; якщо оригінал уже підходить, сюди
+  // пишеться сам оригінал.
+  await ensureColumn(db, "product_images", "igImagePath", "TEXT");
+  await ensureColumn(db, "product_images", "igImageUrl", "TEXT");
 
   // Platform-specific metadata stays on the individual post so scheduled
   // publishes use the exact settings the creator explicitly approved. TikTok

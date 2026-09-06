@@ -145,6 +145,19 @@ Derived media (`slideshow`/`story`) is built on demand via `POST /api/products/:
 on the product (`slideshowVideo*`, `storyImage*`) so a scheduled publish never waits on ffmpeg at slot time.
 Publishing waits on the container's real `status_code` (`waitForContainerReady`) instead of fixed sleeps —
 fixed pauses let longer videos publish before Meta finished processing them, which failed the post.
+
+Instagram accepts **JPEG only**, with an aspect ratio between 4:5 and 1.91:1 and at most 8 MB, so PNG/WEBP
+uploads and ordinary 9:16 phone photos are rejected outright by the Graph API. `prepareInstagramImages`
+(server.ts) therefore builds conforming copies in the background right after a product is created and stores
+them in `product_images.igImage*`; the excess height is padded with a blurred background rather than cropped,
+and an image that already conforms is recorded as-is instead of being duplicated on disk. An empty
+`igImageUrl` means "not processed yet", and publishing falls back to the original.
+
+A **bundle** (`POST /api/products/bundle`) — one Reel whose slideshow mixes photos from 2–6 products — is
+stored as an ordinary product with `bundleOf` set, so it travels the same product → post → scheduler path with
+no special case in publishing. Its `product_images` rows reference the source products' files rather than
+copying them; the rendered reel is self-contained, so deleting a source product later doesn't break it.
+
 The weekly posting plan these formats serve lives in `POSTING_SCHEDULE.md`.
 
 ## Environment variables

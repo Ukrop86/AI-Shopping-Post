@@ -47,6 +47,9 @@ export type ProductInput = {
   slideshowVideoPath?: string;
   storyImageUrl?: string;
   storyImagePath?: string;
+  // Фото, приведені до вимог Instagram (JPEG, 4:5…1.91:1). Для кожного фото —
+  // або підготовлена копія, або оригінал, якщо він уже підходить.
+  igImageUrls?: string[];
   shopName?: string;
   shopDescription?: string;
   shopLanguage?: string;

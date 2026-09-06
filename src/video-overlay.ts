@@ -433,3 +433,113 @@ export async function createStoryFrame(input: StoryFrameInput) {
 
   return { outputPath, outputName };
 }
+
+// ── Зображення під вимоги Instagram ──────────────────────────────────────────
+// Instagram приймає для стрічки ТІЛЬКИ JPEG і тільки зі співвідношенням сторін
+// від 4:5 до 1.91:1 (плюс ліміт 8 МБ). PNG/WEBP/HEIC і будь-яке вертикальне фото
+// вище за 4:5 — а це звичайне фото з телефона — Graph API просто відхиляє.
+// Тому для Instagram готуємо окрему копію: формат приводимо до JPEG, а зайву
+// висоту добиваємо розмитим фоном, а не обрізаємо (обрізка з'їдає взуття й голову).
+
+const IG_MIN_RATIO = 0.8; // 4:5
+const IG_MAX_RATIO = 1.91; // 1.91:1
+const IG_MAX_WIDTH = 1440;
+const IG_MIN_WIDTH = 320;
+const IG_MAX_BYTES = 8 * 1024 * 1024;
+
+async function probeImage(inputPath: string) {
+  const { stdout } = await execFileAsync("ffprobe", [
+    "-v", "error",
+    "-select_streams", "v:0",
+    "-show_entries", "stream=width,height,codec_name",
+    "-of", "json",
+    inputPath,
+  ]);
+  const stream = JSON.parse(stdout).streams?.[0];
+  return {
+    width: Number(stream?.width || 0),
+    height: Number(stream?.height || 0),
+    codec: String(stream?.codec_name || ""),
+  };
+}
+
+export type InstagramImageInput = {
+  inputPath: string;
+  uploadsDir: string;
+  index?: number;
+};
+
+/**
+ * Повертає null, якщо фото вже відповідає вимогам Instagram — тоді публікуємо
+ * оригінал і не плодимо зайвих файлів на диску.
+ */
+export async function createInstagramImage(input: InstagramImageInput) {
+  if (!fsSync.existsSync(input.inputPath)) {
+    throw new Error("Фото не знайдено");
+  }
+
+  const { size } = await fs.stat(input.inputPath);
+  const image = await probeImage(input.inputPath);
+
+  if (!image.width || !image.height) {
+    throw new Error("Не вдалося прочитати розміри фото");
+  }
+
+  const ratio = image.width / image.height;
+  const isJpeg = image.codec === "mjpeg";
+  const ratioOk = ratio >= IG_MIN_RATIO && ratio <= IG_MAX_RATIO;
+
+  if (isJpeg && ratioOk && size <= IG_MAX_BYTES && image.width <= IG_MAX_WIDTH) {
+    return null;
+  }
+
+  let width = image.width;
+  let height = image.height;
+
+  if (ratio < IG_MIN_RATIO) {
+    width = Math.ceil(height * IG_MIN_RATIO);
+  } else if (ratio > IG_MAX_RATIO) {
+    height = Math.ceil(width / IG_MAX_RATIO);
+  }
+
+  if (width > IG_MAX_WIDTH) {
+    height = Math.round((height * IG_MAX_WIDTH) / width);
+    width = IG_MAX_WIDTH;
+  }
+  if (width < IG_MIN_WIDTH) {
+    height = Math.round((height * IG_MIN_WIDTH) / width);
+    width = IG_MIN_WIDTH;
+  }
+
+  await fs.mkdir(input.uploadsDir, { recursive: true });
+  const outputName = `ig-${Date.now()}-${input.index ?? 0}.jpg`;
+  const outputPath = path.join(input.uploadsDir, outputName);
+
+  const chains = [
+    `[0:v]scale=${width}:${height}:force_original_aspect_ratio=increase,` +
+      `crop=${width}:${height},boxblur=20:3[bg]`,
+    `[0:v]scale=${width}:${height}:force_original_aspect_ratio=decrease[fg]`,
+    `[bg][fg]overlay=(W-w)/2:(H-h)/2,setsar=1[out]`,
+  ];
+
+  const render = async (quality: number) => {
+    await execFileAsync("ffmpeg", [
+      "-y",
+      "-i", input.inputPath,
+      "-filter_complex", chains.join(";"),
+      "-map", "[out]",
+      "-frames:v", "1",
+      "-q:v", String(quality),
+      outputPath,
+    ]);
+    return (await fs.stat(outputPath)).size;
+  };
+
+  // 8 МБ на такій ширині майже недосяжні, але дешевше перестрахуватись, ніж
+  // отримати відмову Graph API вже під час публікації за розкладом.
+  if ((await render(3)) > IG_MAX_BYTES) {
+    await render(8);
+  }
+
+  return { outputPath, outputName, width, height };
+}

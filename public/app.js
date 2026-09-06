@@ -636,9 +636,26 @@ function renderInstagramExtras(post) {
       ${ready ? `<img class="instagram-media-preview" src="${escapeHtml(currentProduct.storyImageUrl)}" alt="Кадр для сторіз">` : ""}
       <small class="instagram-note">Опитування, посилання й інші наліпки через API недоступні — їх можна додати вручну вже до опублікованої сторіз.</small>
     `;
-  } else if (format === "auto" && hasVideo && hasPhotos) {
+  } else if (format === "carousel" || (format === "auto" && hasPhotos)) {
+    // Instagram приймає тільки JPEG зі співвідношенням 4:5…1.91:1, тож копії
+    // готуються у фоні одразу після створення товару. Кнопка — на випадок,
+    // якщо фонова підготовка не пройшла.
+    const photosReady = hasPhotos && (currentImages || []).every(image => image.igImageUrl);
     mediaBlock = `
-      <small class="instagram-note warn">Є і відео, і фото: вийде карусель із відео першим слайдом. Вона не потрапляє в стрічку Reels — для охоплення обери «Reels (відео)».</small>
+      ${format === "auto" && hasVideo
+        ? `<small class="instagram-note warn">Є і відео, і фото: вийде карусель із відео першим слайдом. Вона не потрапляє в стрічку Reels — для охоплення обери «Reels (відео)».</small>`
+        : ""}
+      <div class="instagram-media-row">
+        <div>
+          <strong>${photosReady ? "Фото готові до Instagram" : "Фото ще готуються"}</strong>
+          <small>${photosReady
+            ? "JPEG і співвідношення 4:5…1.91:1 — інших Instagram не приймає."
+            : "Копії під вимоги Instagram робляться у фоні. Можна запустити вручну."}</small>
+        </div>
+        <button type="button" class="btn secondary prepare-instagram-media" data-format="carousel" ${busy || !hasPhotos ? "disabled" : ""}>
+          ${busy ? "Готуємо…" : photosReady ? "Оновити фото" : "Підготувати фото"}
+        </button>
+      </div>
     `;
   }
 
@@ -660,7 +677,11 @@ async function prepareInstagramMedia(format) {
 
   instagramMediaState = { productId: currentProduct.id, format, busy: true, error: "" };
   renderPlatformEditor();
-  setLoading(true, format === "slideshow" ? "Збираємо слайдшоу з фото…" : "Готуємо кадр для сторіз…");
+  setLoading(true, format === "slideshow"
+    ? "Збираємо слайдшоу з фото…"
+    : format === "carousel"
+      ? "Готуємо фото під вимоги Instagram…"
+      : "Готуємо кадр для сторіз…");
 
   try {
     const response = await fetch(`/api/products/${currentProduct.id}/instagram-media`, {
@@ -672,8 +693,13 @@ async function prepareInstagramMedia(format) {
     if (!response.ok || !data.success) throw new Error(data.message || "Не вдалося підготувати медіа");
 
     if (data.product) currentProduct = data.product;
+    if (Array.isArray(data.images)) currentImages = data.images;
     instagramMediaState = { productId: currentProduct.id, format, busy: false, error: "" };
-    showMessage(format === "slideshow" ? "Слайдшоу зібрано ✓" : "Кадр для сторіз готовий ✓");
+    showMessage(
+      format === "slideshow" ? "Слайдшоу зібрано ✓"
+        : format === "carousel" ? `Фото готові ✓ (перероблено ${data.imagesPrepared?.prepared ?? 0})`
+          : "Кадр для сторіз готовий ✓"
+    );
   } catch (error) {
     instagramMediaState = { productId: currentProduct.id, format, busy: false, error: error.message };
     throw error;
