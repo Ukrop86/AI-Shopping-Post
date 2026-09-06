@@ -2,6 +2,11 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+> **Read `PROJECT_MAP.md` first** for the detailed "what lives where" map — full file-by-file
+> annotations, the API-route catalog, the data model, per-platform auth models, and a list of
+> recently added features. This file (CLAUDE.md) covers architecture and working rules; PROJECT_MAP.md
+> is the navigation index. Keep both up to date when the structure changes.
+
 ## What this is
 
 **Postly** (product/domain name `postly.pp.ua`; package name is still `ai-shopping-post`) — a multi-tenant SaaS
